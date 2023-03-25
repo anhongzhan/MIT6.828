@@ -846,7 +846,7 @@ question 1为前面的mystery_t的问题
 
 4、What is the maximum amount of physical memory that this operating system can support? Why?
 
-所有的空闲物理页最开始都存储在pages数组中，即struct PageInfo，每个PageInfo占8字节的内存，而JOS为Page分配了1PTSIZE字节的空间，共计4096 $$\times$$1024bytes大小，4096 $$\times$$1024  $$\div$$ 8 = $$2^{19}$$，即最多有$$2^{19}$$个页，每个页的大小为4096字节，所以最多的内存容量为
+所有的空闲物理页最开始都存储在pages数组中，即struct PageInfo，每个PageInfo占8字节的内存，而JOS为Page分配了1PTSIZE字节的空间，共计4096  * 1024bytes大小，4096  * 1024  / 8 = $$2^{19}$$，即最多有$$2^{19}$$个页，每个页的大小为4096字节，所以最多的内存容量为
 
 $$2^{19} \times 4096 = 4GB$$
 
