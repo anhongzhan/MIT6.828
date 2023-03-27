@@ -1,6 +1,6 @@
 *** Now run 'make gdb'.
 ***
-6828 decimal is XXX octal!
+6828 decimal is 15254 octal!
 Physical memory: 131072K available, base = 640K, extended = 130432K
 check_page_free_list() succeeded!
 page_alloc: out of free memory
@@ -18,4 +18,4 @@ check_page_free_list() succeeded!
 check_page_installed_pgdir() succeeded!
 Welcome to the JOS kernel monitor!
 Type 'help' for a list of commands.
-qemu: terminating on signal 15 from pid 8552
+qemu: terminating on signal 15 from pid 10253

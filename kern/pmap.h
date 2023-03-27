@@ -76,7 +76,6 @@ pa2page(physaddr_t pa)
 	return &pages[PGNUM(pa)];
 }
 
-//通过物理页获取内核虚拟地址
 static inline void*
 page2kva(struct PageInfo *pp)
 {
