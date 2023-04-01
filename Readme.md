@@ -467,7 +467,7 @@ ELF头部以下的每个区域都叫做Section(节)，比如.text   .bss都是�
 
 起始我也有这个疑问，直到看到了这张图，来自前面那个介绍ELF的[链接](https://pdos.csail.mit.edu/6.828/2018/readings/elf.pdf)第15页Figure 1-1
 
-![ELF](03Lab3\ELF.PNG)
+![ELF](.\03Lab3\ELF.PNG)
 
 内存就那么大一块，怎么执行都那么多
 
