@@ -467,7 +467,7 @@ ELF头部以下的每个区域都叫做Section(节)，比如.text   .bss都是�
 
 起始我也有这个疑问，直到看到了这张图，来自前面那个介绍ELF的[链接](https://pdos.csail.mit.edu/6.828/2018/readings/elf.pdf)第15页Figure 1-1
 
-![ELF](.\03Lab3\ELF.PNG)
+![ELF](https://github.com/anhongzhan/MIT6.828/blob/lab3/03Lab3/ELF.PNG)
 
 内存就那么大一块，怎么执行都那么多
 
@@ -677,7 +677,7 @@ env_create(uint8_t *binary, enum EnvType type)
 
 上面的链接中提到，在进行make 然后 make qemu之后会出现报错
 
-![bssquestion](..\03Lab3\bssquestion.PNG)
+![bssquestion](https://github.com/anhongzhan/MIT6.828/blob/lab3/03Lab3/bssquestion.PNG)
 
 倒数第三行，会出现报错`kernel panic at kern/pmap.c:148: PADDR called with invalid kva 00000000`
 
@@ -967,7 +967,7 @@ Test your trap handling code using some of the test programs in the `user` direc
 
 拿0号中断divide by zero举例：
 
-![Exception](..\03Lab3\Exception.PNG)
+![Exception](https://github.com/anhongzhan/MIT6.828/blob/lab3/03Lab3/Exception.PNG)
 
 可以看到0号中断没有error code，所以调用宏TRAPHANDLER_NOEC即可，有中断号的则调用宏TRAPHANDLER
 
