@@ -928,7 +928,7 @@ switch (syscallno) {
 
 运行make qemu
 
-![exercise6](F:\MIT6828\note\04Lab4\exercise6.PNG)
+![exercise6](https://github.com/anhongzhan/MIT6.828/blob/lab4/04Lab4/exercise6.PNG)
 
 
 
@@ -1637,19 +1637,19 @@ if (_pgfault_handler == 0) {
 
 `make run-faultread`
 
-![faultread](F:\MIT6828\note\04Lab4\faultread.PNG)
+![faultread](https://github.com/anhongzhan/MIT6.828/blob/lab4/04Lab4/faultread.PNG)
 
 `make run-faultdie`
 
-![faultdie](F:\MIT6828\note\04Lab4\faultdie.PNG)
+![faultdie](https://github.com/anhongzhan/MIT6.828/blob/lab4/04Lab4/faultdie.PNG)
 
 `make run-faultalloc`
 
-![faultalloc](F:\MIT6828\note\04Lab4\faultalloc.PNG)
+![faultalloc](https://github.com/anhongzhan/MIT6.828/blob/lab4/04Lab4/faultalloc.PNG)
 
 `make run-faultallocbad`
 
-![faultallocbad](F:\MIT6828\note\04Lab4\faultallocbad.PNG)
+![faultallocbad](https://github.com/anhongzhan/MIT6.828/blob/lab4/04Lab4/faultallocbad.PNG)
 
 
 
@@ -2491,4 +2491,4 @@ ipc_send(envid_t to_env, uint32_t val, void *pg, int perm)
 
 运行`make grade`，可以得到如下运行结果：
 
-![makegrade](F:\MIT6828\note\04Lab4\makegrade.PNG)
+![makegrade](https://github.com/anhongzhan/MIT6.828/blob/lab4/04Lab4/makegrade.PNG)
