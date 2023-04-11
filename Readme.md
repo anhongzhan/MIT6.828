@@ -1991,7 +1991,7 @@ Part B score: 50/50
 
 运行`user/spin`测试程序，使用`make run-spin`指令，可以得到如下结果：
 
-![spin](F:\MIT6828\note\04Lab4\spin.PNG)
+![spin](https://github.com/anhongzhan/MIT6.828/blob/lab4/04Lab4/spin.PNG)
 
 测试程序创建了一个子进程，这个子进程收到CPU的控制权之后就永远都不退出了。父进程和内核都不会重新获得CPU的控制权了。很明显这不是保护系统防止bug以及恶意代码的理想情况，因为任何的用户模式的进程都能让整个系统停止工作。为了让内核能够抢占运行中的进程，强制重新获得CPU的控制权，我们必须要扩展内核以支持来自时钟硬件的硬件中断。
 
