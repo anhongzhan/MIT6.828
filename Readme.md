@@ -2304,19 +2304,56 @@ sys_ipc_recv(void *dstva)
 //		current environment's address space.
 //	-E_NO_MEM if there's not enough memory to map srcva in envid's
 //		address space.
+// Try to send 'value' to the target env 'envid'.
+// If srcva < UTOP, then also send page currently mapped at 'srcva',
+// so that receiver gets a duplicate mapping of the same page.
+//
+// The send fails with a return value of -E_IPC_NOT_RECV if the
+// target is not blocked, waiting for an IPC.
+//
+// The send also can fail for the other reasons listed below.
+//
+// Otherwise, the send succeeds, and the target's ipc fields are
+// updated as follows:
+//    env_ipc_recving is set to 0 to block future sends;
+//    env_ipc_from is set to the sending envid;
+//    env_ipc_value is set to the 'value' parameter;
+//    env_ipc_perm is set to 'perm' if a page was transferred, 0 otherwise.
+// The target environment is marked runnable again, returning 0
+// from the paused sys_ipc_recv system call.  (Hint: does the
+// sys_ipc_recv function ever actually return?)
+//
+// If the sender wants to send a page but the receiver isn't asking for one,
+// then no page mapping is transferred, but no error occurs.
+// The ipc only happens when no errors occur.
+//
+// Returns 0 on success, < 0 on error.
+// Errors are:
+//	-E_BAD_ENV if environment envid doesn't currently exist.
+//		(No need to check permissions.)
+//	-E_IPC_NOT_RECV if envid is not currently blocked in sys_ipc_recv,
+//		or another environment managed to send first.
+//	-E_INVAL if srcva < UTOP but srcva is not page-aligned.
+//	-E_INVAL if srcva < UTOP and perm is inappropriate
+//		(see sys_page_alloc).
+//	-E_INVAL if srcva < UTOP but srcva is not mapped in the caller's
+//		address space.
+//	-E_INVAL if (perm & PTE_W), but srcva is read-only in the
+//		current environment's address space.
+//	-E_NO_MEM if there's not enough memory to map srcva in envid's
+//		address space.
 static int
 sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
 {
 	// LAB 4: Your code here.
 	//panic("sys_ipc_try_send not implemented");
-	struct Env *rec_env, *cur_env;
+	struct Env *rec_env;
 	int r;
-	int flag = PTE_U | PTE_P;
 	struct PageInfo* pg;
 	pte_t* pte;
 
 	//get current env
-	envid2env(0, &cur_env, 0);
+	//envid2env(0, &cur_env, 0);
 
 	//	-E_BAD_ENV if environment envid doesn't currently exist.
 	//  envid2env return -E_BAD_ENV
@@ -2335,16 +2372,12 @@ sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
 	// After any IPC the kernel sets the new field env_ipc_perm 
 	// in the receiver's Env structure to the permissions of the page received, 
 	// or zero if no page was received.
-	if(rec_env->env_ipc_from){
-		return -E_IPC_NOT_RECV;
-	}
-
-	if((uintptr_t)srcva >= UTOP){
-		perm = 0;
-	}
+	// if(rec_env->env_ipc_from){
+	// 	return -E_IPC_NOT_RECV;
+	// }
 
 	//	-E_INVAL if srcva < UTOP
-	if(perm){
+	if((uintptr_t)srcva < UTOP){
 		//	-E_INVAL if srcva < UTOP but srcva is not page-aligned.
 		if((uintptr_t)srcva & (PGSIZE - 1)){
 			return -E_INVAL;
@@ -2352,19 +2385,19 @@ sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
 
 		//	-E_INVAL if srcva < UTOP and perm is inappropriate
 		//		(see sys_page_alloc).
-		if(((perm & flag) != flag) || (perm & ~PTE_SYSCALL) != 0){
+		if((perm & PTE_U) != PTE_U || (perm & PTE_P) != PTE_P){
 			return -E_INVAL;
 		}
 
 		//	-E_INVAL if srcva < UTOP but srcva is not mapped in the caller's
 		//		address space.
-		if(!(pg = page_lookup(cur_env->env_pgdir, srcva, &pte))){
+		if(!(pg = page_lookup(curenv->env_pgdir, srcva, &pte))){
 			return -E_INVAL;
 		}	
 
 		//	-E_INVAL if (perm & PTE_W), but srcva is read-only in the
 		//		current environment's address space.
-		if((perm & PTE_W) && !((*pte) & PTE_W)){
+		if((perm & PTE_W) && ((size_t) *pte & PTE_W) != PTE_W){
 			return -E_INVAL;
 		}
 
@@ -2375,7 +2408,10 @@ sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
 			if((r = page_insert(rec_env->env_pgdir, pg, rec_env->env_ipc_dstva, perm)) < 0){
 				return r;
 			}
+			rec_env->env_ipc_perm = perm;
 		}
+	}else{
+		rec_env->env_ipc_perm = 0;
 	}
 
 	// Otherwise, the send succeeds, and the target's ipc fields are
@@ -2385,15 +2421,15 @@ sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
 	//    env_ipc_value is set to the 'value' parameter;
 	//    env_ipc_perm is set to 'perm' if a page was transferred, 0 otherwise.
 	rec_env->env_ipc_recving = 0;
-	rec_env->env_ipc_from = cur_env->env_id;
+	rec_env->env_ipc_from = curenv->env_id;
 	rec_env->env_ipc_value = value;
-	rec_env->env_ipc_perm = perm;
+	//rec_env->env_ipc_perm = perm;
 
 	// The target environment is marked runnable again
-	rec_env->env_status = runnable;
+	rec_env->env_status = ENV_RUNNABLE;
 
 	// returning 0 from the paused sys_ipc_recv system call. 
-	rec_env->env_tf.reg_eax = 0;
+	rec_env->env_tf.tf_regs.reg_eax = 0;
 
 	return 0;
 }
