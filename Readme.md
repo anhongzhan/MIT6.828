@@ -1171,4 +1171,4 @@ Run make run-testshell to test your shell. `testshell` simply feeds the above co
 
 运行结果：
 
-![result](F:\MIT6828\note\05Lab5\result.PNG)
+![result](https://github.com/anhongzhan/MIT6.828/blob/lab5/05Lab5/result.PNG)
