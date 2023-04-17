@@ -251,7 +251,11 @@ duppage(envid_t envid, unsigned pn)
 	int r;
 	// LAB 4: Your code here.
 	int perm = PTE_U | PTE_P;
-	if ((uvpt[pn] & PTE_W) || (uvpt[pn] & PTE_COW)) {
+	// 首先判断PTE_SHARE位
+	// 如果有则将所有的page 拷贝过去
+	if ((uvpt[pn] & PTE_SHARE)){
+		sys_page_map(0, (void *) (pn * PGSIZE), envid, (void *) (pn * PGSIZE), PTE_SYSCALL);
+	} else if ((uvpt[pn] & PTE_W) || (uvpt[pn] & PTE_COW)) {
 		perm |= PTE_COW;
 		if ((r = sys_page_map(0, (void *) (pn * PGSIZE), envid, (void *) (pn * PGSIZE), perm)) < 0) {
 			panic("duppage: %e\n", r);
