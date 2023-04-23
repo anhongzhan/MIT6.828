@@ -90,7 +90,7 @@ E1000可以产生大量的调试输出，因此必须启动特定的日志通道
 
 下图展示了进程之间的不同与联系。该图片展示了包括设备驱动的整个系统。本次实验中，我们要实现高亮为绿色的部分。
 
-![ns](F:\MIT6828\note\06Lab6\ns.png)
+![ns](https://github.com/anhongzhan/MIT6.828/blob/lab6/06Lab6/ns.png)
 
 
 
@@ -420,7 +420,7 @@ e1000_attachfn(struct pci_func *pcif)
 
 
 
-![ds](F:\MIT6828\note\06Lab6\ds.PNG)
+![ds](https://github.com/anhongzhan/MIT6.828/blob/lab6/06Lab6/ds.PNG)
 
 
 
@@ -516,7 +516,7 @@ For the TCTL.COLD, you can assume full-duplex operation. For TIPG, refer to the 
 - 初始化Transmit Control Register (TCTL)，TCTL.EN = 1b，TCTL.PSP = 1b, TCTL.CT = 10h, TCTL.COLD = 40h(假设全双工)
 - 使用下面二进制值编写 Transmit IPG (TIPG) register，去获得最小的legal Inter Packet Gap
 
-![TIPG](F:\MIT6828\note\06Lab6\TIPG.PNG)
+![TIPG](https://github.com/anhongzhan/MIT6.828/blob/lab6/06Lab6/TIPG.PNG)
 
 
 
@@ -551,11 +551,11 @@ For the TCTL.COLD, you can assume full-duplex operation. For TIPG, refer to the 
 
 接下来是3.4节的transmit descriptor array的结构
 
-![RT](F:\MIT6828\note\06Lab6\RT.PNG)
+![RT](https://github.com/anhongzhan/MIT6.828/blob/lab6/06Lab6/RT.PNG)
 
 这里还详细介绍了一些寄存器的作用和大小：
 
-![RTdetail](F:\MIT6828\note\06Lab6\RTdetail.PNG)
+![RTdetail](https://github.com/anhongzhan/MIT6.828/blob/lab6/06Lab6/RTdetail.PNG)
 
 
 
@@ -887,7 +887,7 @@ sys_pkt_send(void *data, size_t len)
 
 运行`make grade`
 
-![partA](F:\MIT6828\note\06Lab6\partA.PNG)
+![partA](https://github.com/anhongzhan/MIT6.828/blob/lab6/06Lab6/partA.PNG)
 
 
 
@@ -1229,4 +1229,4 @@ send_data(struct http_request *req, int fd)
 
 运行`make grade`
 
-![partB](F:\MIT6828\note\06Lab6\partB.PNG)
+![partB](https://github.com/anhongzhan/MIT6.828/blob/lab6/06Lab6/partB.PNG)
