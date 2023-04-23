@@ -11,6 +11,7 @@
 #include <kern/syscall.h>
 #include <kern/console.h>
 #include <kern/sched.h>
+#include <kern/time.h>
 
 // Print a string to the system console.
 // The string is exactly 'len' characters long.
@@ -511,6 +512,27 @@ sys_ipc_recv(void *dstva)
 	//return 0;
 }
 
+// Return the current time.
+static int
+sys_time_msec(void)
+{
+	// LAB 6: Your code here.
+	//panic("sys_time_msec not implemented");
+	return (int)time_msec();
+}
+
+int
+sys_pkt_send(void *data, size_t len)
+{
+	return e1000_transmit(data, len);
+}
+
+static int
+sys_pkt_recv(void *addr, size_t *len)
+{
+	return e1000_receive(addr, len);
+}
+
 // Dispatches to the correct kernel function, passing the arguments.
 int32_t
 syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
@@ -550,6 +572,12 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
 			return sys_ipc_recv((void *) a1);
 		case SYS_env_set_trapframe:
 			return sys_env_set_trapframe(a1, (struct Trapframe*)a2);
+		case SYS_time_msec:
+			return sys_time_msec();
+		case SYS_pkt_send:
+			return sys_pkt_send((void *)a1, (size_t)a2);
+		case SYS_pkt_recv:
+			return sys_pkt_recv((void *)a1, (size_t *)a2);
 		default:
 			return -E_INVAL;
 	}

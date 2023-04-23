@@ -1,1174 +1,1232 @@
-# Lab 5: File system, Spawn and Shell
+# Lab 6: Network Driver (default final project)
 
-实验五要求我们merge lab4之后，仍然能够运行pingpong，primes以及forktree三个test case，运行之前需要注释`kern/init.c`中的ENV_CREATE(fs_fs)这一行，同时，注释`lib/exit.c`中的close_all()一行
-
-运行`make run-pingpong`，发现报错：
-
-```
-lib/spawn.c: In function ‘spawn’:
-lib/spawn.c:110:35: error: taking address of packed member of ‘struct Trapframe’ may result in an unaligned pointer value [-Werror=address-of-packed-member]
-  110 |  if ((r = init_stack(child, argv, &child_tf.tf_esp)) < 0)
-      |                                   ^~~~~~~~~~~~~~~~
-cc1: all warnings being treated as errors
-```
+网卡驱动不足以让我们的操作系统连接到互联网。在最新的lab6的代码中，我们提供了一个网络栈和一个网络服务器。其具体内容在`/net`文件夹中，`/kern`文件夹中也有文件更新。
 
 
 
-查了一些网上的资料，最终方法，打开GNUmakefile，第92行
-
-```
-CFLAGS += -Wall -Wno-format -Wno-unused -Werror -gstabs -m32
-```
-
-修改为
-
-```
-CFLAGS += -Wall -Wno-format -Wno-unused -gstabs -m32
-```
-
-之后便可顺利运行了
-
-最后别忘了将前面的两行注释删掉，是否需要修改GNUmakefile稍后再看
+除了写驱动外，我们也需要为驱动提供一个系统调用的接口。我们需要实现在网络栈和驱动之间传入包所缺失的代码。我们也需要实现一个web服务器将所有的东西整合到一起。使用新的web服务器，我么将能够serve files from your file system
 
 
 
-## 1、On-Disk File System Structure
-
-大多数UNIX文件系统将可用的硬盘空间分为两个部分：inode区域和data区域。UNIX文件系统为每个文件分配一个inode；文件inode保存着至关重要的元数据，例如：文件的统计属性以及指向数据块的指针。data区域被分为更多的数据块(data bolcks)，文件系统在数据块中存储文件数据和元目录数据；目录条目(Directory entries)包含文件名和指向inode的指针。如果文件系统中的多个目录条目引用了该文件的inode，则称该文件为硬链接文件。由于我们的文件系统不支持硬链接，我们不需要这种间接的层次，因此可以进行方便的简化：我们的文件系统甚至不会使用inode，而是使用目录条目存储文件的元数据。
+大部分内核设备驱动程序代码都必须从头开始编写。与前面的实验相比，本实验提供的指导要少很多：没有框架文件，没有一成不变的系统调用接口，需要设计决策要留给自己。
 
 
 
-文件和目录逻辑上都包含一系列的数据块，他们可能分散在整个磁盘中，就像进程的虚拟地址空间页面分散在物理内存中一样。文件系统隐藏了数据块分布的细节，提供了文件中任意偏移的连续字节的读取接口。文件系统进程在内部处理对目录的所有修改，视为执行文件创建和删除等操作的一部分。我们的文件系统允许用户进程直接读取元目录数据，这也就意味着用户进程可以自己执行目录扫描操作，而不必依赖对文件系统的额外特殊调用。这种目录扫描方法的缺点，以及大多数现在UNIX变体不鼓励他的原因是：他使得应用程序依赖目录元数据的格式，使得在不改变或至少重新编译应用程序的情况下很难改变文件系统的内部布局。
+## 1、QEMU's virtual network
+
+我们会使用QEMU的用户模式网络栈因为它不需要管理员权限运行。我们已经更新了makefile使QEMU用户模式网络栈和虚拟E1000网卡可用。
 
 
 
-### 1.1、Sectors and Blocks
-
-大部分硬盘不能读写单独的某些字节的数据，替代的方法是读写sector的单元。在JOS中，扇区(sector)大小为512字节。文件系统实际上使用的是Blocks的单元。要注意两个术语之间的区别：扇区大小是磁盘硬件的一个属性，而块大小是使用磁盘的操作系统的一个方面。文件系统的块的大小必须是扇区大小的整数倍。
+默认情况下，QEMU提供一个虚拟路径，IP地址为10.0.2.2并且给JOS分配一个IP地址10.0.2.15。为了保证简单，我们在`net/ns.h`中将这些内容硬编码进去了。
 
 
 
-UNIX xv6文件系统使用大小为512字节的块，和扇区的大小相同。大多数现在文件系统使用更大的block size，因为存储空间越来越偏移并且操作更大的细粒度更加方便。
+当QEMU虚拟网络允许JOS随意地链接互联网时，JOS的IP地址10.0.2.15在QEMU意外的虚拟网络中没有意义（也就是说，QEMU使用了类似NAT网络）。因此我们不能直接在JOS内部链接服务器，即使是从QEMU的host地址也不行。为了能够访问到外部，我们将QEMU配置为在主机上的某个端口上运行的服务器，该服务器仅通过连接到JOS中的某个端口，并在真实主机和虚拟网络之间来回传输数据。
 
 
 
-**我们的文件系统会使用block size=4096bytes，方便匹配处理器的页面大小**
+我们要在端口7(echo)和端口80(http)运行JOS。为了防止共享Athena machines中冲突，makefile根据我们的用户ID为这些端口生成了对应的转发端口。运行`make chich-posts`可以找到相应的端口映射到哪些端口上了。更多的细节可以运行`make nc-7`以及`make nc-80`。
+
+它允许你直接与终端中运行的端口上的服务器进行交互。
 
 
 
-### 1.2、Superblocks
+### 1.1、Packet Inspection
 
-文件系统通常在磁盘上“易于找到”的位置保留特定的磁盘块，以保存描述整个文件系统属性的元数据，例如：block size，disk size，找到root目录的任何元数据，文件系统上次安装的时间以及文件系统上次被检查出错误的时间。这些特殊的块被称作“superblocks”。
+makefile也配置QEMU的网络栈来记录所有传入和传输数据包，具体内容记录在qemu.pcap中
+
+使用`tcpdump -XXnr qemu.pcap`可以得到被捕获的包的二进制ASCII码的转储
+
+同样，也可以用wireshark直接获取pcap文件。
 
 
 
-我们的文件系统也存在一个superblock，永远脑婆睡觉哦磁盘的第一个块。其分布被定义在`inc/fs.h`的struct Super中
+### 1.2、Debugging the E1000
+
+我们非常幸运地使用虚拟硬件。因为E1000运行在软件上，虚拟的E1000可以向我们报告它内部状态和遇到的任何问题。通常，对于使用逻辑编写驱动程序的开发人员来说，这种情况是非常奢侈的。
+
+
+
+E1000可以产生大量的调试输出，因此必须启动特定的日志通道。你可能会发现一些有用的渠道：
+
+| Flag      | Meaning                                            |
+| --------- | -------------------------------------------------- |
+| tx        | Log packet transmit operations                     |
+| txerr     | Log transmit ring errors                           |
+| rx        | Log changes to RCTL                                |
+| rxfilter  | Log filtering of incoming packets                  |
+| rxerr     | Log receive ring errors                            |
+| unknown   | Log reads and writes of unknown registers          |
+| eeprom    | Log reads from the EEPROM                          |
+| interrupt | Log interrupts and changes to interrupt registers. |
+
+
+
+为了使`tx`和`txerr`日志可用，可以使用`make E1000_DEBUG=tx, txerr`
+
+注意：**E1000_DEBUG标志仅在6.828版本的QEMU中可用**
+
+
+
+你可以进一步使用软件来模拟硬件进行调试。如果你曾经卡住并且不理解为什么E1000没有按照你期望的方式相应，你可以查看QEMU在hw/net/e1000.c中E1000的实现。
+
+
+
+## 2、The Network Server
+
+从头写一个网络栈是一项艰难的工作。作为替代，我们要使用IwIP，一款轻量级TCP/IP协议套件，其中就包含一个网络栈。本次实验中，IwIP就是一个实现BSD套接字接口，并具有包输入输出端口的黑盒。
+
+
+
+网络服务器实际上是以下四个进程的组合
+
+- core network server environment (includes socket call dispatcher and lwIP)
+- input environment
+- output environment
+- timer environment
+
+
+
+下图展示了进程之间的不同与联系。该图片展示了包括设备驱动的整个系统。本次实验中，我们要实现高亮为绿色的部分。
+
+![ns](F:\MIT6828\note\06Lab6\ns.png)
+
+
+
+### 2.1、The Core Network Server Environment
+
+内核网络服务器进程包括socket call dispatcher和IwIP本身。socket call dispatcher像文件服务器一样工作。用户进程使用stubs(lib/nsipc.c)向核心网络进程发送IPC。如果你看lib/nsipc.c，你就会发现我们使用和文件服务器一样的方法去寻找核心网络服务器：i386_init使用NS_TYPE_NS创建NS进程，因此我们扫描envs，寻找这个特殊的进程类型。对于每个用户进程IPC，网络服务器中的调度程序代表用户调用IwIP提供的适当的BSD套接字接口函数。
+
+
+
+常规的用户进程不会直接使用nsipc_*调用。相反，他们使用lib/socket.c中的函数，该函数提供一个基于文件描述符的socket API。因此，用户进程通过文件描述符引用套接字，就像他们引用磁盘上的文件一样。许多操作(connect、accept等)都是特定于套接字的，但是read、write和close都要经过lib/fd.c中普通的文件描述符设备调度代码。就像文件服务器为所有打开的文件维护唯一的内部ID一样，IwIP也为所有打开的套接字生成唯一ID。在文件服务器和网络服务器中，我们都使用存储在结构体Fd中的信息将每个环境的文件描述符映射到这些唯一的ID空间。
+
+
+
+尽管文件服务器和网络服务器的IPC调度程序看起来是一样的，但有一个关键区别。像accept和recv这样的BSD套接字调用可以无限期地阻塞。如果调度程序让IwIP执行这些阻塞调用中的一个，那么调度程序也会阻塞，并且整个系统一次只能有一个未完成的网络调用。由于这是不可接受的，因此网络服务器使用用户级线程来避免阻塞整个服务器环境。对于每个传入的IPC消息，调度程序创建一个线程，并在新创建的线程中处理请求。如果线程阻塞，则只有该线程进入睡眠状态，而其他线程继续运行。
+
+
+
+除了核心网络环境之外，还有三种辅助环境。除了接受来自用户应用程序的消息外，核心网络环境的调度程序还接受来自输入和计时器环境的消息。
+
+
+
+### 2.2、The Output Environment
+
+当服务用户环境套接字调用时，IwIP将生成数据包供网卡传输。LwIP将使用NSREQ_OUTPUT IPC消息将每个要传输的数据包发送到输出助手进程，并将数据包附加在IPC消息的page参数中。输出进程负责接收这些信息并且通过我们将要实现的系统调用接口将这些包传输到设备驱动上。
+
+
+
+### 2.3、The Input Environment
+
+被网卡接受的包需要被注入到IwIP。对于每一个被设备驱动接收的包，输入进程将包拉出内核空间然后使用NSREQ_INPUT IPC信息将包发送到核心服务进程。
+
+
+
+数据包输入功能与核心网络环境分离，因为JOS很难同时接受IPC消息并轮询或等待来自设备驱动程序的数据包。我们没有可选择的系统调用去允许进程监听不同的输入资源去识别哪个输入准备好进行了。
+
+
+
+如果你看`net/input.c`和`net/output.c`，你会发现他们都需要被实现。这主要是因为实现取决于你的系统调用接口。在你实现驱动和系统调用接口之后，你需要写代码去实现两个helper environment。
+
+
+
+### 2.4、The Timer Environment
+
+定时器进程定时向核心网服务器发送类型为NSREQ_TIMER的定时器超时消息。lwIP使用来自该线程的计时器消息来实现各种网络超时。
+
+
+
+## 3、Part A: Initialization and transmitting packets
+
+我们的内核没有时间的概念，因此我们需要添加它。有一个硬件产生的10ms触发一次的时钟中断。每次时钟中断我们可以自增一个变量来表示时间增加了10ms。这部分内容在`keen/time.c`中实现，但是还没有嵌入到你的内核中
+
+
+
+**Exercise 1.** Add a call to `time_tick` for every clock interrupt in `kern/trap.c`. Implement `sys_time_msec` and add it to `syscall` in `kern/syscall.c` so that user space has access to the time.
+
+
+
+#### trap_dispatch
+
+首先在`kern/trap.c`中添加time_tick的调用，IRQ_OFFSET + IRQ_TIMER是时钟中断的trap号
 
 ```C
-// File system super-block (both in-memory and on-disk)
+	if(tf->tf_trapno == IRQ_OFFSET + IRQ_TIMER) {
+		//IRQ_OFFSET + IRQ_TIMER是时钟中断的trap号
+		time_tick();
+		lapic_eoi();
+		sched_yield();
+		return ;
+	}
 
-#define FS_MAGIC	0x4A0530AE	// related vaguely to 'J\0S!'
+	// Add time tick increment to clock interrupts.
+	// Be careful! In multiprocessors, clock interrupts are
+	// triggered on every CPU.
+	// LAB 6: Your code here.
+```
 
-struct Super {
-	uint32_t s_magic;		// Magic number: FS_MAGIC
-	uint32_t s_nblocks;		// Total number of blocks on disk
-	struct File s_root;		// Root directory node
+
+
+#### sys_time_msec
+
+```C
+// Return the current time.
+static int
+sys_time_msec(void)
+{
+	// LAB 6: Your code here.
+	//panic("sys_time_msec not implemented");
+	return (int)time_msec();
+}
+```
+
+
+
+`kern/time.c`中的函数time_msec()返回当前的时间
+
+```C
+void
+time_tick(void)
+{
+	ticks++;
+	if (ticks * 10 < ticks)
+		panic("time_tick: time overflowed");
+}
+
+unsigned int
+time_msec(void)
+{
+	return ticks * 10;
+}
+```
+
+由于ticks是unsigned int类型，我们也可以看一下time_tick的实现原理，ticks * 10 < ticks说明此时ticks已经到了unsigned int的最大值出，由于数据类型的原因增加十倍之后反而变小了。
+
+
+
+#### syscall
+
+最后添加调用
+
+```C
+		case SYS_time_msec:
+			return sys_time_msec();
+```
+
+
+
+### 3.1、The Network Interface Card
+
+编写驱动程序需要深入了解硬件和提供给软件的接口。实验文本将提供如何与E1000接口互动，但您需要在编写驱动程序时广泛地使用Intel手册
+
+
+
+**Exercise 2.** Browse Intel's [Software Developer's Manual](https://pdos.csail.mit.edu/6.828/2018/readings/hardware/8254x_GBe_SDM.pdf) for the E1000. This manual covers several closely related Ethernet controllers. QEMU emulates the 82540EM.
+
+You should skim over chapter 2 now to get a feel for the device. To write your driver, you'll need to be familiar with chapters 3 and 14, as well as 4.1 (though not 4.1's subsections). You'll also need to use chapter 13 as reference. The other chapters mostly cover components of the E1000 that your driver won't have to interact with. Don't worry about the details right now; just get a feel for how the document is structured so you can find things later.
+
+While reading the manual, keep in mind that the E1000 is a sophisticated device with many advanced features. A working E1000 driver only needs a fraction of the features and interfaces that the NIC provides. Think carefully about the easiest way to interface with the card. We strongly recommend that you get a basic driver working before taking advantage of the advanced features.
+
+
+
+### 3.2、PCI Interface
+
+E1000是一个PCI设备，也就是说它通过主板连接到PCI总线上。PCI总线包括地址、数据和中断线，并且允许CPU与PCI设备通信以及PCI设备读写内存。PCI设备在使用之前需要被发现和初始化。发现是通过遍历PCI总线寻找相应的设备，初始化是分配IO和内存空间，以及协商给设备使用的IRQ(Interrupt ReQuest)
+
+
+
+`kern/pci.c`中已经提供了PCI的代码。为了在boot期间初始化执行PCI初始化，PCI代码遍历PCI总线寻找设备。当他发现设备时，读取设备的vendor ID以及device ID，然后使用这两个值作为key去搜索`pci_array_vendor`数组。该数组由`struct pci_driver`组成
+
+```C
+struct pci_driver {
+    uint32_t key1, key2;
+    int (*attachfn) (struct pci_func *pcif);
+};
+```
+
+如果被发现的设备vendor ID和device ID匹配到了数组中的一项，PCI代码调用该项的`attachfn`去展开设备初始化。
+
+
+
+attach function通过一个PCI function去初始化。PCI卡可以暴漏很多功能，但是E1000仅暴漏一个。下面是JOS如何表示一个PCI函数：
+
+```C
+struct pci_func {
+    struct pci_bus *bus;
+
+    uint32_t dev;
+    uint32_t func;
+
+    uint32_t dev_id;
+    uint32_t dev_class;
+
+    uint32_t reg_base[6];
+    uint32_t reg_size[6];
+    uint8_t irq_line;
 };
 ```
 
 
 
-Block0被用来保留bootloader和分区表。因此文件系统一般不会使用特别靠前的磁盘块。许多真实的文件系统保存大量的superblocks，在磁盘的几个宽间距区域中复制，以便于如果其中一个被损坏或磁盘在该区域出现media error，仍然可以找到其他superblock并使用他们访问文件系统
+上述结构反映了开发手册地4.1节中的表4-1中的一些条目。`struct pci_func`的最后三项是我们尤其感兴趣的，分别表示他们记录的协商内存、IO以及中断资源。`reg_base`和`reg_size`数组包含之多六个Base Address Register(BARs)。`reg_base`存储内存映射区域的基地址，`reg_size`存储字节数的大小或者来自reg_base的IO端口的相关基础数据。`irq_line`包含为中断分配给设备的IRQ线。E1000 BARs的具体意义在表4-2的第二半部分。
 
 
 
-### 1.3、File Meta-data
+当一个设备的attach function被调用时，设备已经被发现但是还不可用。这意味着PCI代码还没有确定分配给设备的资源，例如地址空间和IRQ线。也就是说`struct pci_func`的最后三项还没有被填入。attach function应该调用pci_func_enable，使设备可用，协商他们的资源，然后填入到`struct pci_func`中。
 
-我们的文件系统中描述文件的元数据的分布定义在`inc/fs.h`的struct File中
+
+
+**Exercise 3.** Implement an attach function to initialize the E1000. Add an entry to the `pci_attach_vendor` array in `kern/pci.c` to trigger your function if a matching PCI device is found (be sure to put it before the `{0, 0, 0}` entry that mark the end of the table). You can find the vendor ID and device ID of the 82540EM that QEMU emulates in section 5.2. You should also see these listed when JOS scans the PCI bus while booting.
+
+For now, just enable the E1000 device via `pci_func_enable`. We'll add more initialization throughout the lab.
+
+We have provided the `kern/e1000.c` and `kern/e1000.h` files for you so that you do not need to mess with the build system. They are currently blank; you need to fill them in for this exercise. You may also need to include the `e1000.h` file in other places in the kernel.
+
+When you boot your kernel, you should see it print that the PCI function of the E1000 card was enabled. Your code should now pass the `pci attach` test of make grade.
+
+
+
+首先，查找用户手册的5.2节，可以发现，这里我们应该用Desktop对应的ID
+
+| Stepping  | Vendor ID | Device ID | Description |
+| --------- | --------- | --------- | ----------- |
+| 82540EM-A | 8086h     | 100E      | Desktop     |
+| 82540EM-A | 8086h     | 1015      | Mobile      |
+
+
+
+题目中要求我们查找到两个ID之后填写这一部分，我们会发现他是一个pci_driver类型的数组
 
 ```C
-struct File {
-	char f_name[MAXNAMELEN];	// filename
-	off_t f_size;			// file size in bytes
-	uint32_t f_type;		// file type
+struct pci_driver pci_attach_vendor[] = {
+	{ 0, 0, 0 },
+};
+```
 
-	// Block pointers.
-	// A block is allocated iff its value is != 0.
-	uint32_t f_direct[NDIRECT];	// direct blocks
-	uint32_t f_indirect;		// indirect block
+这个数据结构前面介绍过，第三部分是一个`int (*attachfn) (struct pci_func *pcif);`
 
-	// Pad out to 256 bytes; must do arithmetic in case we're compiling
-	// fsformat on a 64-bit machine.
-	uint8_t f_pad[256 - MAXNAMELEN - 8 - 4*NDIRECT - 4];
-} __attribute__((packed));	// required only on some 64-bit machines
+当vendor ID和device ID匹配成功时，我们会调用attach function去初始化该设备。
+
+**所以我们的目标就是要找到这个初始化函数**
+
+
+
+练习3接下来告诉我们调用pci_func_enable使设备可用即可，再加上前面的介绍`当一个设备的attach function被调用时，设备已经被发现但是还不可用。`我们知道设备初始化函数需要调用这个函数，且根据练习3接下来的描述可知初始化函数需要写在e1000.h以及e1000.c中
+
+~~说实话，这部分描述的感觉没啥逻辑，这个也是我阅读英文教程常见的问题（也有可能使我得问题），就感觉这部分根本就没讲清除具体要怎么办，看了好久都没有思路，整理出上面的内容是看了其他人的实现之后强行联系起来的！！！~~
+
+
+
+#### e1000.h
+
+需要使用pci.h中的pci_func_enable函数，所以需要include一下
+
+```C
+#include <kern/pci.h>
+
+#define E1000_VENDER_ID_82540EM 0x8086
+#define E1000_DEV_ID_82540EM 0x100E
+
+int 
+e1000_attachfn(struct pci_func *pcif);
 ```
 
 
 
-前面提到过，我们的文件系统中没有inode，因此这个元数据存储在磁盘中的一个目录条目中。和大多数真正的文件系统不同，为了方便我们将会使用一个`File`结构来代表文件元数据，作为其在磁盘和内存中展现的内容。
-
-
-
-`struct File`中的f_direct数组包含存储block number前10的块的空间，这部分我们称之为文件的direct blocks。对于不超过10*4096=40KB的文件，这意味着文件的所有块的块号将直接适合文件结构本身。但是，对于更大的文件，我们需要额外的blocks去承载文件剩余的部分。因此，对于任何大于40KB的文件，我们分配额外的磁盘块，叫做indirect block，去承载之多4096/4=1024个额外的块号。我们的文件系统最多允许文件装在到1034个块，或者最多4MB。为了支持更大的文件，真实的文件系统一般会支持double和triple-indirect blocks。
-
-
-
-### 1.4、Directories versus Regular Files
-
-在我们的文件系统中。一个`File`结构可以表示一个regular file或者一个目录，这两种类型被`File`结构中的`type`域标识。文件系统以相同的方式管理regular file和目录文件，除了他根本不解释域常规文件相关联的数据块的内容。而文件系统将目录文件的内容解释为一系列描述目录中的文件和子目录的文件结构。
-
-
-
-我们的文件系统中的superblock中保存着文件系统根目录的元数据。目录文件的内容是一系列的`File`结构，描述着文件和文件系统根目录的存储位置。根目录中的任何子目录都可能包含更多表示子子目录的File结构，依此类推。
-
-
-
-## 2、The File System
-
-本次实验的目的并非让我们实现完整的文件系统，而是让我们实现关键部分。事实上，我们要负责读取块到块缓存，并将他们刷新回磁盘；分配磁盘块；在IPC接口实现读、写和打开。
-
-
-
-### 2.1、Disk Access
-
-操作系统中的文件系统进程需要能够访问磁盘，但是我们的内核中还没有实现访问磁盘的函数。我们没有采用传统的“单片”操作系统策略，即向内核中添加IDE磁盘驱动程序以及允许文件系统访问他的系统调用，相反，我们将IDE磁盘驱动程序实现作为用户及文件系统进程的一部分。我们仍然需要稍微修改内核，以便文件系统进程拥有自己实现访问磁盘所需的特权。
-
-
-
-（不会翻译！！！）
-
-It is easy to implement disk access in user space this way as long as we rely on polling, "programmed I/O" (PIO)-based disk access and do not use disk interrupts. It is possible to implement interrupt-driven device drivers in user mode as well (the L3 and L4 kernels do this, for example), but it is more difficult since the kernel must field device interrupts and dispatch them to the correct user-mode environment.
-
-
-
-x86处理器使用EFLAGS寄存器中的IOPL位来确定是否允许保护模式代码执行特殊的设备IO指令，如IN和OUT指令。因为我们需要的所有的IDE磁盘寄存器位于 x86 IO地址空间，而不是内存映射空间。想要允许文件系统访问这些寄存器，我们只需要对文件系统进程给与**I/O Privilege**即可。
-
-
-
-**Exercise 1.** `i386_init` identifies the file system environment by passing the type `ENV_TYPE_FS` to your environment creation function, `env_create`. Modify `env_create` in `env.c`, so that it gives the file system environment I/O privilege, but never gives that privilege to any other environment.
-
-Make sure you can start the file environment without causing a General Protection fault. You should pass the "fs i/o" test in make grade.
-
-
-
-#### env_create
-
-实验要求我们修改`kern/env.c`中的env_create函数，保证type参数为ENV_TYPE_FS时，我们赋予要创建的进程访问IO的权利
-
-
-
-前面提到过，**x86处理器使用EFLAGS寄存器中的IOPL位来确定是否允许保护模式代码执行特殊的设备IO指令**，全局搜索IOPL，会发现
-
-`inc/mmu.h`中定义着Eflgas寄存器相关的内容，其中包括
+#### e1000.c
 
 ```C
-#define FL_IOPL_MASK	0x00003000	// I/O Privilege Level bitmask
-#define FL_IOPL_0	0x00000000	//   IOPL == 0
-#define FL_IOPL_1	0x00001000	//   IOPL == 1
-#define FL_IOPL_2	0x00002000	//   IOPL == 2
-#define FL_IOPL_3	0x00003000	//   IOPL == 3
-```
-
-
-
-按照经验判断，我们第一次使用IOPL，肯定要用大众化的FL_IOPL_MASK，后面如果有特殊需求可能会用到FL_IOPL_0，所以我们代码中写道，如果后续有问题我们再来修改:
-
-```C
-// If this is the file server (type == ENV_TYPE_FS) give it I/O privileges.
-	// LAB 5: Your code here.
-	if(type == ENV_TYPE_FS){
-		env->env_tf.tf_eflags |= FL_IOPL_MASK;
-	}
-```
-
-
-
-使用`make grade`，发现可以通过“fs i/o”，并且我们也**未**将前面注释的`-Werror`恢复过来，这个参数的意思是将warning当作error，所以目前不能恢复，不知道后续是否有相关的内容。
-
-
-
-#### Question
-
-1. Do you have to do anything else to ensure that this I/O privilege setting is saved and restored properly when you subsequently switch from one environment to another? Why?
-
-答：不需要，进程切换时EFLAGS寄存器被保存起来，并不会被其他进程使用。
-
-
-
-### 2.2、The Block Cache
-
-我们要实现一个简单的"buffer cache"在处理器虚拟内存系统的帮助下。代码在`fs/bc.c`中
-
-我们的文件系统被限制处理不超过3GB的磁盘空间。我们保留了一个大的，整好3GB的空间区域，从0x10000000(DISKMAP)到0xD0000000(DISKMAP + DISKMAX)，作为内存映射版本的硬盘。`fs/bc.c`中的diskaddr实现从磁盘块号到虚拟地址的转换。
-
-由于我们的文件系统进程有自己的地址空间，独立于系统中所有其他环江的虚拟地址空间，文件系统进程需要做的唯一一件事情就是实现文件访问，以这种方式保留大部分文件系统环境的地址空间是合理的。
-
-当然，把整个磁盘读取进入内存会花费很长的时间，因此作为替代我们会实现一种demand paging的方法，其中，我们只在磁盘映射区域中分配页，并从磁盘中读取相应的块以相应该区域中的缺页。
-
-
-
-**Exercise 2.** Implement the `bc_pgfault` and `flush_block` functions in `fs/bc.c`. `bc_pgfault` is a page fault handler, just like the one your wrote in the previous lab for copy-on-write fork, except that its job is to load pages in from the disk in response to a page fault. When writing this, keep in mind that (1) `addr` may not be aligned to a block boundary and (2) `ide_read` operates in sectors, not blocks.
-
-The `flush_block` function should write a block out to disk *if necessary*. `flush_block` shouldn't do anything if the block isn't even in the block cache (that is, the page isn't mapped) or if it's not dirty. We will use the VM hardware to keep track of whether a disk block has been modified since it was last read from or written to disk. To see whether a block needs writing, we can just look to see if the `PTE_D` "dirty" bit is set in the `uvpt` entry. (The `PTE_D` bit is set by the processor in response to a write to that page; see 5.2.4.3 in [chapter 5](http://pdos.csail.mit.edu/6.828/2011/readings/i386/s05_02.htm) of the 386 reference manual.) After writing the block to disk, `flush_block` should clear the `PTE_D` bit using `sys_page_map`.
-
-Use make grade to test your code. Your code should pass "check_bc", "check_super", and "check_bitmap".
-
-
-
-#### bc_pgfault
-
-我们需要做两件事：
-
-1. 为磁盘映射区域分配页
-2. 将磁盘中的内容读取到页中（`fs/ide.c`中有读取的函数）
-
-有两点提示：
-
-1. addr需要向PGSIZE对齐
-2. ide_read操作的是sector，不是block
-
-```C
-// Fault any disk block that is read in to memory by
-// loading it from disk.
-static void
-bc_pgfault(struct UTrapframe *utf)
+int
+e1000_attachfn(struct pci_func *pcif)
 {
-	void *addr = (void *) utf->utf_fault_va;
-	uint32_t blockno = ((uint32_t)addr - DISKMAP) / BLKSIZE;
-	int r;
-
-	// Check that the fault was within the block cache region
-	if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
-		panic("page fault in FS: eip %08x, va %08x, err %04x",
-		      utf->utf_eip, addr, utf->utf_err);
-
-	// Sanity check the block number.
-	if (super && blockno >= super->s_nblocks)
-		panic("reading non-existent block %08x\n", blockno);
-
-	// Allocate a page in the disk map region, read the contents
-	// of the block from the disk into that page.
-	// Hint: first round addr to page boundary. fs/ide.c has code to read
-	// the disk.
-	//
-	// LAB 5: you code here:
-	addr = ROUNDDOWN(addr, PGSIZE);
-	if((r = sys_page_alloc(0, addr, PTE_P | PTE_U | PTE_W)) < 0)
-		panic("in bc_pgfault, sys_page_alloc: %e\n", r);
-
-	if((r = ide_read(blockno * BLKSIZE / SECTSIZE, addr, BLKSIZE / SECTSIZE)) < 0)
-		panic("in bc_pgfault, ide_read: %e\n", r);
-
-	// Clear the dirty bit for the disk block page since we just read the
-	// block from disk
-	if ((r = sys_page_map(0, addr, 0, addr, uvpt[PGNUM(addr)] & PTE_SYSCALL)) < 0)
-		panic("in bc_pgfault, sys_page_map: %e", r);
-
-	// Check that the block we read was allocated. (exercise for
-	// the reader: why do we do this *after* reading the block
-	// in?)
-	if (bitmap && block_is_free(blockno))
-		panic("reading free block %08x\n", blockno);
-}
-```
-
-
-
-#### flush_block
-
-将内存空间中的数据写入磁盘
-
-```C
-// Flush the contents of the block containing VA out to disk if
-// necessary, then clear the PTE_D bit using sys_page_map.
-// If the block is not in the block cache or is not dirty, does
-// nothing.
-// Hint: Use va_is_mapped, va_is_dirty, and ide_write.
-// Hint: Use the PTE_SYSCALL constant when calling sys_page_map.
-// Hint: Don't forget to round addr down.
-```
-
-清除超出disk的虚拟地址块的内容，然后使用sys_page_map清空PTE_D位
-
-如果块不在块缓存或者不是脏的，什么都不需要做
-
-```C
-void
-flush_block(void *addr)
-{
-	uint32_t blockno = ((uint32_t)addr - DISKMAP) / BLKSIZE;
-
-	if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
-		panic("flush_block of bad va %08x", addr);
-
-	// LAB 5: Your code here.
-	//panic("flush_block not implemented");
-	int r;
-	addr = ROUNDDOWN(addr, PGSIZE);
-	if(!va_is_mapped(addr) || !va_is_dirty(addr)) return ;
-	// Flush the contents of the block containing VA out to disk if necessary
-	if((r = ide_write(blockno * BLKSECTS, addr, BLKSECTS)) < 0)
-		panic("flush_block: ide_write %e\n", r);
-	
-	// Hint: Use the PTE_SYSCALL constant when calling sys_page_map.
-	if((r = sys_page_map(0, addr, 0, addr, uvpt[PGNUM(addr)] & PTE_SYSCALL)) < 0)
-		panic("flush_block: sys_page_map %e\n", r);
-}
-```
-
-
-
-### 2.3、The Block Bitmap
-
-在fs_init设置bitmap指针之后，我们可以将bitmap视为一组填充的位数组，磁盘上的每个块都有一个。例如，block_is_free简单的查看一个给定的block是否被标记为free
-
-
-
-**Exercise 3.** Use `free_block` as a model to implement `alloc_block` in `fs/fs.c`, which should find a free disk block in the bitmap, mark it used, and return the number of that block. When you allocate a block, you should immediately flush the changed bitmap block to disk with `flush_block`, to help file system consistency.
-
-Use make grade to test your code. Your code should now pass "alloc_block".
-
-
-
-#### alloc_block
-
-练习要求我们仿照free_block实现alloc_block，首先来看free_block，该函数可以将一个块在bitmap中标记为free
-
-```C
-// Mark a block free in the bitmap
-void
-free_block(uint32_t blockno)
-{
-	// Blockno zero is the null pointer of block numbers.
-	if (blockno == 0)
-		panic("attempt to free zero block");
-	bitmap[blockno/32] |= 1<<(blockno%32);
-}
-```
-
-实际上我们要判断某个块是否是free，需要使用block_is_free()函数
-
-```C
-// Check to see if the block bitmap indicates that block 'blockno' is free.
-// Return 1 if the block is free, 0 if not.
-bool
-block_is_free(uint32_t blockno)
-{
-	if (super == 0 || blockno >= super->s_nblocks)
-		return 0;
-	if (bitmap[blockno / 32] & (1 << (blockno % 32)))
-		return 1;
+	pci_func_enable(pcif);
 	return 0;
 }
 ```
 
-可以看到，bitmap[blockno / 32]表示该块是否空闲，所以我们想要将其标记为不空闲，则将改位标记为~(1 << (blockno % 32))即可
 
-接下来看alloc_block
+
+#### pci.h
 
 ```C
-// Search the bitmap for a free block and allocate it.  When you
-// allocate a block, immediately flush the changed bitmap block
-// to disk.
-//
-// Return block number allocated on success,
-// -E_NO_DISK if we are out of blocks.
-//
-// Hint: use free_block as an example for manipulating the bitmap.
+// pci_attach_vendor matches the vendor ID and device ID of a PCI device. key1
+// and key2 should be the vendor ID and device ID respectively
+struct pci_driver pci_attach_vendor[] = {
+	{ E1000_VENDER_ID_82540EM, E1000_DEV_ID_82540EM, &e1000_attachfn },
+	{ 0, 0, 0 },
+};
 ```
 
-搜索bitmap，找到一个空闲的块然后为其分配内存。当我们分配一个块时，立即清洗改变过的bitmap块
 
 
+### 3.3、Memory-mapped I/O
+
+软件通过memory-mapped I/O(mmio)与E1000通信。在JOS之前你已经看到这个两遍：CGA控制台和LAPIC都是通过写入和读取“内存”来控制和查询的设备。但是他们读写都不经过DRAM。他们直接访问设备。
+
+
+
+pci_func_enable和E1000协商了一块MMIO并且尺寸大小存储在BAR 0(reg_base[0]以及reg_size[0])。这是分配给设备的物理内存的地址范围，意思是必须做些什么使得我们可以通过虚拟地址访问这块区域。由于MMIO区域被分配给非常高的物理内存（一般高于3G），我们不能使用KADDR去访问它（由于内核的2556MB限制）。因此，我们不得不创建一个新的内存映射。我们会使用MMIOBASE以上的区域。由于PCI设备初始化发生在JOS创建用户进程之前，我们可以在kern_pgdir中创建映射并且他会一直可用。
+
+
+
+**Exercise 4.** In your attach function, create a virtual memory mapping for the E1000's BAR 0 by calling `mmio_map_region` (which you wrote in lab 4 to support memory-mapping the LAPIC).
+
+You'll want to record the location of this mapping in a variable so you can later access the registers you just mapped. Take a look at the `lapic` variable in `kern/lapic.c` for an example of one way to do this. If you do use a pointer to the device register mapping, be sure to declare it `volatile`; otherwise, the compiler is allowed to cache values and reorder accesses to this memory.
+
+To test your mapping, try printing out the device status register (section 13.4.2). This is a 4 byte register that starts at byte 8 of the register space. You should get `0x80080783`, which indicates a full duplex link is up at 1000 MB/s, among other things.
+
+
+
+练习4要求我们在附加函数中添加映射，也就是在e1000.c中我们自创的函数，并且提到我们需要创建一个变量保存映射的位置，且参考`kern/lapic.c`中的lapic变量，并且使用volatile
+
+```C
+physaddr_t lapicaddr;        // Initialized in mpconfig.c
+volatile uint32_t *lapic;
+```
+
+我们创建一个类似于lapic的变量即可：
+
+
+
+#### e1000.c
+
+题目要求我们打印寄存器空间第8个字节开始的4字节内容
+
+```C
+volatile void *bar_va;
+
+// LAB 6: Your driver code here
+int
+e1000_attachfn(struct pci_func *pcif)
+{
+	pci_func_enable(pcif);
+	//Exercise4 create virtual memory mapping
+	bar_va = mmio_map_region(pcif->reg_base[0], pcif->reg_size[0]);
+	uint32_t *status_reg = E1000REG(E1000_STATUS);
+	assert(*status_reg == 0x80080783);
+	return 0;
+}
+```
+
+
+
+#### e1000.h
+
+```C
+#define E1000_DEVICE_STATUS 0x00008
+```
+
+
+
+![ds](F:\MIT6828\note\06Lab6\ds.PNG)
+
+
+
+### 3.4、DMA
+
+你可以想象通过读写E1000寄存器来进行数据发送和接收，但是这样会很慢，并且需要E1000缓存包数据。作为替代，E1000使用Direct Memory Access(DMA)不需要设计CPU直接读写内存。驱动负责为传输和接收队列分配内存，设置DMA描述符，然后使用这些队列的位置配置E1000，但之后的一切都是异步的。想要传输一个包，驱动将其复制到传输队列中的下一个DMA描述符中，并且通知E1000有另一个包可用。E1000会在传输包的时间讲数据复制出描述符。类似地，当E1000接收到一个包时，将包复制到接收队列中的下一个描述符，驱动下一次会将数据读出。
+
+
+
+接收和传输队列非常类似，他们都包含一系列的描述符。虽然这些描述符的确切结构各不相同，但每个描述符都包含一些标志和包含数据包数据的缓冲区的物理地址。
+
+
+
+队列时一个环形数组，意思是当个卡或者驱动到达队尾时，他会折回到队首去。两种队列都有头指针和尾指针，队列的内容时两个指针之间的描述符。硬件总是先消耗头部的描述符并且移动头指针，而驱动程序总是向尾部添加描述符并移动尾指针。传输队列中的描述符表示等待发送的包，接收队列中的描述符是card可以接收数据包的自由描述符。
+
+
+
+指向这些数组的指针以及描述符中数据包缓冲区的地址必须都是物理地址，因为硬件直接在物理RAM之间执行DMA，而不需要经过MMU。
+
+
+
+### 3.5、Transmitting Packets
+
+E1000的传输和接收函数并不互相依赖，因此我们可以单独使一个进行工作。我们将首先攻击发送数据包，因为如果不先发送一个“I'm here”数据包，我们就无法测试接收。
+
+
+
+首先，我们必须初始化传输card，遵守14.5节中描述的步骤。首先设置传输队列，队列的精确结构在3.4节中描述，描述符的结构在3.3.3节中描述。我们不使用E1000的TCP卸载特性，因此我们可以专注于“遗留传输描述符格式”。
+
+
+
+### 3.5.1、C Structures
+
+使用C的struct描述E1000非常方便。类似于我们已经用过的struct Trapframe，C struct可以精确地让你知道内存中的数据布局。C可以在字段之间插入填充，但是E1000的结构被布置成这样，应该不是问题。如果你遇到对齐问题，请查看GCC的“packed”属性。
+
+
+
+下面是表3-8中描述的legacy transmit descriptor
+
+```C
+ 63            48 47   40 39   32 31   24 23   16 15             0
+  +---------------------------------------------------------------+
+  |                         Buffer address                        |
+  +---------------+-------+-------+-------+-------+---------------+
+  |    Special    |  CSS  | Status|  Cmd  |  CSO  |    Length     |
+  +---------------+-------+-------+-------+-------+---------------+
+```
+
+
+
+该结构的第一个字节在最右侧，所以将其转换成C struct需要从有到左，从上到下。如果你斜视它，你会发现所有的字段都适合一个标准大小的类型：
+
+```C
+struct tx_desc
+{
+	uint64_t addr;
+	uint16_t length;
+	uint8_t cso;
+	uint8_t cmd;
+	uint8_t status;
+	uint8_t css;
+	uint16_t special;
+};
+```
+
+
+
+你的驱动必须为传输描述符数组和由传输描述符指向的数据包缓冲区保留内存。有很多种方式可以实现，从动态分配到简单地在全局变量中声明他们。无论选择什么，请记住E1000直接访问物理地址，这意味着它访问的任何缓冲区都必须在物理内存中是连续的。
+
+
+
+也有其他的处理缓冲区的方式。最简单的，也是我们推荐的，就是在驱动程序初始化期间，为每个描述符保留一个包缓冲区的空间，并简单地将包数据复制到这些预分配的缓冲区中。以太网数据包最大大小是1518字节，这限制了缓冲区的大小。
+
+
+
+**Exercise 5.** Perform the initialization steps described in section 14.5 (but not its subsections). Use section 13 as a reference for the registers the initialization process refers to and sections 3.3.3 and 3.4 for reference to the transmit descriptors and transmit descriptor array.
+
+Be mindful of the alignment requirements on the transmit descriptor array and the restrictions on length of this array. Since TDLEN must be 128-byte aligned and each transmit descriptor is 16 bytes, your transmit descriptor array will need some multiple of 8 transmit descriptors. However, don't use more than 64 descriptors or our tests won't be able to test transmit ring overflow.
+
+For the TCTL.COLD, you can assume full-duplex operation. For TIPG, refer to the default values described in table 13-77 of section 13.4.34 for the IEEE 802.3 standard IPG (don't use the values in the table in section 14.5).
+
+
+
+说实话，知道大概的流程，但是完全不知道从哪开始！只能参考网上的实现了
+
+
+
+首先打开操作手册14.5，其流程大致如下：
+
+- 为transmit descriptor list分配一块内存区域。软件要保证内存16字节对齐。TDBAL/TDBAH寄存器存储该区域的地址，内存地址是64位，这俩寄存器32位，所以分别表示low和high，拼起来是64位
+- 将循环数组的大小存储到Transmit Descriptor Length (TDLEN)寄存器中，以字节为单位
+- 电源启动或者重置时，Transmit Descriptor Head and Tail (TDH/TDT)寄存器应该被设置为0
+- 初始化Transmit Control Register (TCTL)，TCTL.EN = 1b，TCTL.PSP = 1b, TCTL.CT = 10h, TCTL.COLD = 40h(假设全双工)
+- 使用下面二进制值编写 Transmit IPG (TIPG) register，去获得最小的legal Inter Packet Gap
+
+![TIPG](F:\MIT6828\note\06Lab6\TIPG.PNG)
+
+
+
+
+
+接下来查询第13节，找出寄存器的位置
+
+| **category** | **Abbreviation** | offset |
+| ------------ | ---------------- | ------ |
+| Transmit     | TDBAL            | 03800h |
+| Transmit     | TDBAH            | 03804h |
+| Transmit     | TDLEN            | 03808h |
+| Transmit     | TDH              | 03810h |
+| Transmit     | TDT              | 03818h |
+| Transmit     | TCTL             | 00400h |
+| Transmit     | TIPG             | 00410h |
+
+
+
+再然后，参考3.3.3节的transmit descriptor的结构，和前面的描述相同
+
+```C
+ 63            48 47   40 39   32 31   24 23   16 15             0
+  +---------------------------------------------------------------+
+  |                         Buffer address                        |
+  +---------------+-------+-------+-------+-------+---------------+
+  |    Special    |  CSS  | Status|  Cmd  |  CSO  |    Length     |
+  +---------------+-------+-------+-------+-------+---------------+
+```
+
+
+
+接下来是3.4节的transmit descriptor array的结构
+
+![RT](F:\MIT6828\note\06Lab6\RT.PNG)
+
+这里还详细介绍了一些寄存器的作用和大小：
+
+![RTdetail](F:\MIT6828\note\06Lab6\RTdetail.PNG)
+
+
+
+接下来开始写代码：
+
+首先完成寄存器地址以及描述符的定义
+
+#### e1000.h
+
+```C
+#define E1000_STATUS   0x00008  /* Device Status - RO */
+#define E1000_TCTL     0x00400  /* TX Control - RW */
+#define E1000_TIPG     0x00410  /* TX Inter-packet gap -RW */
+#define E1000_TDBAL    0x03800  /* TX Descriptor Base Address Low - RW */
+#define E1000_TDBAH    0x03804  /* TX Descriptor Base Address High - RW */
+#define E1000_TDLEN    0x03808  /* TX Descriptor Length - RW */
+#define E1000_TDH      0x03810  /* TX Descriptor Head - RW */
+#define E1000_TDT      0x03818  /* TX Descripotr Tail - RW */
+#define E1000_TXD_STAT_DD    0x00000001 /* Descriptor Done */
+#define E1000_TXD_CMD_EOP    0x00000001 /* End of Packet */
+#define E1000_TXD_CMD_RS     0x00000008 /* Report Status */
+
+struct e1000_tx_desc
+{
+       uint64_t addr;
+       uint16_t length;
+       uint8_t cso;
+       uint8_t cmd;
+       uint8_t status;
+       uint8_t css;
+       uint16_t special;
+}__attribute__((packed));
+
+struct e1000_tdt {
+       uint16_t tdt;
+       uint16_t rsv;
+};
+
+struct e1000_tdlen {
+       uint32_t zero: 7;
+       uint32_t len:  13;
+       uint32_t rsv:  12;
+};
+
+static void 
+e1000_transmit_init();
+```
+
+
+
+#### e1000.c
+
+```C
+struct e1000_tdh *tdh;
+struct e1000_tdt *tdt;
+struct e1000_tx_desc tx_desc_array[TXDESCS];
+char tx_buffer_array[TXDESCS][TX_PKT_SIZE];
+
+//see section 14.5 in https://pdos.csail.mit.edu/6.828/2018/labs/lab6/e1000_hw.h
+static void
+e1000_transmit_init()
+{
+       int i;
+       for (i = 0; i < TXDESCS; i++) {
+               tx_desc_array[i].addr = PADDR(tx_buffer_array[i]);
+               tx_desc_array[i].cmd = 0;
+               tx_desc_array[i].status |= E1000_TXD_STAT_DD;
+       }
+			 //TDLEN register
+       struct e1000_tdlen *tdlen = (struct e1000_tdlen *)E1000REG(E1000_TDLEN);
+       tdlen->len = TXDESCS;
+			 
+			 //TDBAL register
+       uint32_t *tdbal = (uint32_t *)E1000REG(E1000_TDBAL);
+       *tdbal = PADDR(tx_desc_array);
+
+			 //TDBAH regsiter
+       uint32_t *tdbah = (uint32_t *)E1000REG(E1000_TDBAH);
+       *tdbah = 0;
+
+		   //TDH register, should be init 0
+       tdh = (struct e1000_tdh *)E1000REG(E1000_TDH);
+       tdh->tdh = 0;
+
+		   //TDT register, should be init 0
+       tdt = (struct e1000_tdt *)E1000REG(E1000_TDT);
+       tdt->tdt = 0;
+
+			 //TCTL register
+       struct e1000_tctl *tctl = (struct e1000_tctl *)E1000REG(E1000_TCTL);
+       tctl->en = 1;
+       tctl->psp = 1;
+       tctl->ct = 0x10;
+       tctl->cold = 0x40;
+
+			 //TIPG register
+       struct e1000_tipg *tipg = (struct e1000_tipg *)E1000REG(E1000_TIPG);
+       tipg->ipgt = 10;
+       tipg->ipgr1 = 4;
+       tipg->ipgr2 = 6;
+}
+```
+
+
+
+最后将e1000_transmit_init()函数加入到e1000_attachfn()中：
 
 ```C
 int
-alloc_block(void)
+e1000_attachfn(struct pci_func *pcif)
 {
-	// The bitmap consists of one or more blocks.  A single bitmap block
-	// contains the in-use bits for BLKBITSIZE blocks.  There are
-	// super->s_nblocks blocks in the disk altogether.
+	pci_func_enable(pcif);
+	cprintf("reg_base:%x, reg_size:%x\n", pcif->reg_base[0], pcif->reg_size[0]);
+			
+	//Exercise4 create virtual memory mapping
+	bar_va = mmio_map_region(pcif->reg_base[0], pcif->reg_size[0]);
+	
+	uint32_t *status_reg = E1000REG(E1000_STATUS);
+	assert(*status_reg == 0x80080783);
 
-	// LAB 5: Your code here.
-	//panic("alloc_block not implemented");
-
-	uint32_t blockno;
-	//找到空闲的blockno
-	for(blockno = 2; blockno < super->s_nblocks && !block_is_free(blockno); blockno++);
-	//如果没有空闲，返回-E_NO_DISK
-	if(blockno >= super->s_nblocks) return -E_NO_DISK;
-	//将空闲块标记为不空闲
-	bitmap[blockno / 32] &= ~(1 << (blockno % 32));
-	//flush the changed bitmap block to disk.
-	flush_block(&bitmap[blockno / 32]);
-	return blockno;
+	e1000_transmit_init();
+	return 0;
 }
+```
+
+
+
+运行**make E1000_DEBUG=TXERR,TX qemu**，可以看到`e1000: tx disabled`
+
+
+
+既然传输已经初始化完成，我们就不得不写代码传输一个包并且通过系统调用使其到达用户空间。为了传输一个包，我们必须要将其加入到传输队列尾部，也就是说要将包数据拷贝到下一个包buffer中，然后更新TDT(transmit descriptor tail)寄存器用来告诉card有另一个包进入了传输队列。
+
+
+
+但是，传输队列只有这么大。如果card落后于包传输，并且传输队列已满，会发送什么情况？为了检测这种情况，我们需要从E1000得到一些反馈。不幸的是，我们不能使用TDH(transmit descriptor head)寄存器，文档中明确声明从软件中读取寄存器是不可靠的。但是，如果我们再传输描述符的cmd字段中设置RS位(Report Status)，那么，当card再该描述符中传输了数据包之后，card将在描述符的status字段中设置DD位(Descriptor Done)。如果设置了描述符的DD位，说明我们可以安全地回收该描述符并使用它传输另一个包。
+
+
+
+如果用户使用了传输系统调用，但是下一个描述符的DD位没有被设置，说明传输队列已满，该怎么办？我们必须决定这种情况下应该怎么办。我们可以直接将packet扔掉。网络协议对此的弹性是有限的，如果我们丢弃大量的包，协议可能会无法恢复。我们也可以提示用户去重试，这样做的好处就是将问题回退给生成数据的环境。
+
+
+
+**Exercise 6.** Write a function to transmit a packet by checking that the next descriptor is free, copying the packet data into the next descriptor, and updating TDT. Make sure you handle the transmit queue being full.
+
+
+
+#### e1000.h
+
+```C
+int 
+e1000_transmit(void *data, size_t len);
+```
+
+
+
+#### e1000.c
+
+```C
+int
+e1000_transmit(void *data, size_t len)
+{
+       uint32_t current = tdt->tdt;		//tail index in queue
+       if(!(tx_desc_array[current].status & E1000_TXD_STAT_DD)) {
+               return -E_TRANSMIT_RETRY;
+       }
+       tx_desc_array[current].length = len;
+       tx_desc_array[current].status &= ~E1000_TXD_STAT_DD;
+       tx_desc_array[current].cmd |= (E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS);
+       memcpy(tx_buffer_array[current], data, len);
+       uint32_t next = (current + 1) % TXDESCS;
+       tdt->tdt = next;
+       return 0;
+}
+```
+
+
+
+**Exercise 7.** Add a system call that lets you transmit packets from user space. The exact interface is up to you. Don't forget to check any pointers passed to the kernel from user space.
+
+
+
+#### lib.h
+
+`inc/lib.h`中添加函数声明
+
+```C
+int sys_pkt_send(void *addr, size_t len);
+```
+
+
+
+#### kern/syscall.c
+
+```C
+int
+sys_pkt_send(void *data, size_t len)
+{
+	return e1000_transmit(data, len);
+}
+```
+
+
+
+添加case
+
+```C
+		case SYS_pkt_send:
+			return sys_pkt_send((void *)a1, (size_t)a2);
+```
+
+
+
+#### inc/syscall.h
+
+添加SYS_packet_try_send
+
+```
+enum {
+	SYS_cputs = 0,
+	SYS_cgetc,
+	SYS_getenvid,
+	SYS_env_destroy,
+	SYS_page_alloc,
+	SYS_page_map,
+	SYS_page_unmap,
+	SYS_exofork,
+	SYS_env_set_status,
+	SYS_env_set_trapframe,
+	SYS_env_set_pgfault_upcall,
+	SYS_yield,
+	SYS_ipc_try_send,
+	SYS_ipc_recv,
+	SYS_time_msec,
+	SYS_pkt_send,
+	NSYSCALLS
+};
+```
+
+
+
+### 3.6、Transmitting Packets: Network Server
+
+我们的设备驱动成熟传输端已经有了一个系统调用接口，是时候发送数据包了。output helper environment的目标是在循环中执行以下操作:接受来自core network server的NSREQ_OUTPUT IPC消息，并使用上面添加的系统调用将伴随这些IPC消息的数据包发送到网络设备驱动程序。NSREQ_OUTPUT IPC由net/lwip/jos/jif/jif.c中的low_level_output函数发送，它将lwIP堆栈绑定到JOS的network system。每个IPC将包含一个页面，该页面由一个union Nsipc和它的struct jif_pkt pkt字段中的包组成(参见`inc/ns.h`)。
+
+
+
+```C
+struct jif_pkt {
+    int jp_len;
+    char jp_data[0];
+};
+```
+
+
+
+jp_len表示数据包长度。IPC页面上的所有后续字节都专用于包内容(除了jp_len以外所有数据都是data)。结构的末尾使用jp_data[0]这样的零长度数组是一种常见的C语言技巧，用于表示缓冲区没有预先确定长度。由于C不做数组边界检查，只要确保结构后面有足够的未使用内存，就可以像使用任何大小的数组一样使用jp_data(这也太不安全了！！！)
+
+
+
+当设备驱动程序的传输队列中没有更多空间时，要注意the device driver, the output environment and the core network server之间的交互。core network server使用IPC向output environment发送数据包。如果由于send packet系统调用而导致output environment挂起(suspended)，因为驱动程序没有更多的缓冲空间来容纳新包，那么core network server将阻塞，等待output environmnet接受IPC调用。
+
+
+
+**Exercise 8.** Implement `net/output.c`.
+
+
+
+#### output
+
+```C
+void
+output(envid_t ns_envid)
+{
+	binaryname = "ns_output";
+
+	// LAB 6: Your code here:
+	// 	- read a packet from the network server
+	//	- send the packet to the device driver
+	uint32_t whom;
+	int perm;
+	int32_t req;
+
+	while (1) {
+		req = ipc_recv((envid_t *)&whom, &nsipcbuf,  &perm);     //接收核心网络进程发来的请求
+		if (req != NSREQ_OUTPUT) {
+			cprintf("not a nsreq output\n");
+			continue;
+		}
+
+    	struct jif_pkt *pkt = &(nsipcbuf.pkt);
+    	while (sys_pkt_send(pkt->jp_data, pkt->jp_len) < 0) {        //通过系统调用发送数据包
+       		sys_yield();
+    	}	
+	}
+}
+```
+
+
+
+运行`make E1000_DEBUG=TXERR,TX run-net_testoutput`之后，会出现
+
+```C
+ld: obj/net/output.o: in function `output':
+net/output.c:18: undefined reference to `sys_packet_try_send'
+```
+
+
+
+#### sys_pkt_send
+
+查找了一下发现，output.c引用了`inc/lib.h`，而`inc/lib.h`中定义的函数在`lib/syscall.c`中实现的
+
+所以我们需要在`lib/syscall.c`中添加实现
+
+```C
+int
+sys_pkt_send(void *data, size_t len)
+{
+	return syscall(SYS_pkt_send, 1, (uint32_t)data, len, 0, 0, 0);
+}
+```
+
+
+
+**注意添加到lib/syscall.c**中，而不是`kern/syscall.c`
+
+
+
+运行`make grade`
+
+![partA](F:\MIT6828\note\06Lab6\partA.PNG)
+
+
+
+## 4、Part B: Receiving packets and the web server
+
+### 4.1、Receiving Packets
+
+就像我们传输包时所作的一样，我们必须配置E1000来接收数据包，并提供receive descriptor queue and receive descriptor。第3.2节描述包接收的工作原理，包括接收队列结构和接收描述符
+
+
+
+**Exercise 9.** Read section 3.2. You can ignore anything about interrupts and checksum offloading (you can return to these sections if you decide to use these features later), and you don't have to be concerned with the details of thresholds and how the card's internal caches work.
+
+
+
+receive queue和transmit queue非常相似，除了它由等待被传入的包填充的empty packet buffers组成。当网络空闲时，传输队列是空的，而接收队列是满的。
+
+
+
+当E1000接收到一个数据包时，它首先检查它是否匹配card配置的过滤器，如果数据包不匹配任何过滤器，则忽略他。否则，E1000将尝试从接收队列的头部检索下一个接收描述符。如果头(RDH)赶上了尾(RDT)，那么接收队列就没有可用的描述符，因此卡将丢弃数据包。如果有一个空闲的接收描述符，它将包数据复制到描述符指向的缓冲区中，设置描述符的DD(Descriptor Done)和EOP(End of Packet) status bits，并增加RDH。
+
+如果E1000在一个接收描述符中接收到一个大于packet buffer的包，它将从接收队列中检索尽可能多的描述符来存储包的全部内容。为了表明这已经发生，它将在所有这些描述符上设置DD状态位，但只在最后一个描述符上设置EOP status bit 。您可以在驱动程序中处理这种可能性，或者简单地将卡配置为不接受“long packets”(也称为巨型帧(jumbo frames))，并确保接收缓冲区足够大，可以存储尽可能大的standard Ethernet packet (1518字节)。
+
+
+
+
+
+**Exercise 10.** Set up the receive queue and configure the E1000 by following the process in section 14.4. You don't have to support "long packets" or multicast. For now, don't configure the card to use interrupts; you can change that later if you decide to use receive interrupts. Also, configure the E1000 to strip the Ethernet CRC, since the grade script expects it to be stripped.
+
+By default, the card will filter out *all* packets. You have to configure the Receive Address Registers (RAL and RAH) with the card's own MAC address in order to accept packets addressed to that card. You can simply hard-code QEMU's default MAC address of 52:54:00:12:34:56 (we already hard-code this in lwIP, so doing it here too doesn't make things any worse). Be very careful with the byte order; MAC addresses are written from lowest-order byte to highest-order byte, so 52:54:00:12 are the low-order 32 bits of the MAC address and 34:56 are the high-order 16 bits.
+
+The E1000 only supports a specific set of receive buffer sizes (given in the description of RCTL.BSIZE in 13.4.22). If you make your receive packet buffers large enough and disable long packets, you won't have to worry about packets spanning multiple receive buffers. Also, remember that, just like for transmit, the receive queue and the packet buffers must be contiguous in physical memory.
+
+You should use at least 128 receive descriptors
+
+
+
+#### e1000.h
+
+```C
+static void 
+e1000_receive_init();
+```
+
+
+
+#### e1000.c
+
+```C
+static void
+e1000_receive_init()
+{			 //RDBAL and RDBAH register
+       uint32_t *rdbal = (uint32_t *)E1000REG(E1000_RDBAL);
+       uint32_t *rdbah = (uint32_t *)E1000REG(E1000_RDBAH);
+       *rdbal = PADDR(rx_desc_array);
+       *rdbah = 0;
+
+       int i;
+       for (i = 0; i < RXDESCS; i++) {
+               rx_desc_array[i].addr = PADDR(rx_buffer_array[i]);
+       }
+			 //RDLEN register
+       struct e1000_rdlen *rdlen = (struct e1000_rdlen *)E1000REG(E1000_RDLEN);
+       rdlen->len = RXDESCS;
+
+			 //RDH and RDT register
+       rdh = (struct e1000_rdh *)E1000REG(E1000_RDH);
+       rdt = (struct e1000_rdt *)E1000REG(E1000_RDT);
+       rdh->rdh = 0;
+       rdt->rdt = RXDESCS-1;
+
+       uint32_t *rctl = (uint32_t *)E1000REG(E1000_RCTL);
+       *rctl = E1000_RCTL_EN | E1000_RCTL_BAM | E1000_RCTL_SECRC;
+
+       uint32_t *ra = (uint32_t *)E1000REG(E1000_RA);
+       uint32_t ral, rah;
+       get_ra_address(E1000_MAC, &ral, &rah);
+       ra[0] = ral;
+       ra[1] = rah;
+}
+```
+
+
+
+现在可以实现接收包了。要接收数据包，驱动程序必须跟踪下一个准备接收数据包的描述符(提示:根据您的设计，E1000中可能已经有一个寄存器记录了这一点)。与传输类似，文档声明RDH寄存器不能可靠地从软件中读取，因此，为了确定包是否已被发送到描述符的包缓冲区，您必须读取描述符中的DD状态位。如果设置了DD位，您可以从描述符的包缓冲区复制包数据，然后通过更新队列的尾部索引RDT告诉card描述符是空闲的。
+
+
+
+如果没有设置了DD位的描述符，则没有收到包。这是接收端等效于传输队列已满时的情况，在这种情况下可以做几件事。
+
+
+
+您可以简单地返回一个“try again”错误，并要求caller(要从接收队列拿数据的环境)重试。虽然这种方法适用于满的transmit queues ，因为这是一种瞬态条件，但是不适用于 receive queues，因为接收队列可能会在很长一段时间内保持空。
+
+
+
+第二种方法是挂起调用环境，直到接收队列中有要处理的包为止。这个策略非常类似于sys_ipc_recv。就像在IPC中一样，因为每个CPU只有一个内核堆栈，所以一旦我们离开内核，堆栈上的状态就会丢失。我们需要设置一个标志，指示receive queue underflow已挂起一个环境，并记录系统调用参数。这种方法的缺点是复杂性:必须指示E1000生成接收中断，驱动程序必须处理这些中断，以便恢复阻塞的等待数据包的环境。
+
+
+
+**Exercise 11.** Write a function to receive a packet from the E1000 and expose it to user space by adding a system call. Make sure you handle the receive queue being empty.
+
+
+
+#### e1000.h
+
+```C
+struct e1000_rx_desc {
+       uint64_t addr;
+       uint16_t length;
+       uint16_t chksum;
+       uint8_t status;
+       uint8_t errors;
+       uint16_t special;
+}__attribute__((packed));
+
+int 
+e1000_receive(void *addr, size_t *len);
+```
+
+
+
+#### e1000.c
+
+```C
+struct e1000_rdh *rdh;
+struct e1000_rdt *rdt;
+struct e1000_rx_desc rx_desc_array[RXDESCS];
+char rx_buffer_array[RXDESCS][RX_PKT_SIZE];
+
+int
+e1000_receive(void *addr, size_t *len)
+{
+       static int32_t next = 0;
+       if(!(rx_desc_array[next].status & E1000_RXD_STAT_DD)) {	//simply tell client to retry
+               return -E_RECEIVE_RETRY;
+       }
+       if(rx_desc_array[next].errors) {
+               cprintf("receive errors\n");
+               return -E_RECEIVE_RETRY;
+       }
+       *len = rx_desc_array[next].length;
+       memcpy(addr, rx_buffer_array[next], *len);
+
+       rdt->rdt = (rdt->rdt + 1) % RXDESCS;
+       next = (next + 1) % RXDESCS;
+       return 0;
+}
+```
+
+
+
+#### inc/lib.h
+
+```C
+int sys_pkt_recv(void *addr, size_t *len);
+```
+
+
+
+#### kern/syscall.c
+
+```C
+static int
+sys_pkt_recv(void *addr, size_t *len)
+{
+	return e1000_receive(addr, len);
+}
+```
+
+
+
+添加Case：
+
+```C
+		case SYS_pkt_recv:
+			return sys_pkt_recv((void *)a1, (size_t *)a2);
+```
+
+
+
+#### inc/syscall.h
+
+添加`SYS_pkt_recv`
+
+```C
+enum {
+	SYS_cputs = 0,
+	SYS_cgetc,
+	SYS_getenvid,
+	SYS_env_destroy,
+	SYS_page_alloc,
+	SYS_page_map,
+	SYS_page_unmap,
+	SYS_exofork,
+	SYS_env_set_status,
+	SYS_env_set_trapframe,
+	SYS_env_set_pgfault_upcall,
+	SYS_yield,
+	SYS_ipc_try_send,
+	SYS_ipc_recv,
+	SYS_time_msec,
+	SYS_pkt_send,
+	SYS_pkt_recv,
+	NSYSCALLS
+};
+```
+
+
+
+#### lib/syscall.c
+
+```C
+int
+sys_pkt_recv(void *addr, size_t *len)
+{
+	return syscall(SYS_pkt_recv, 1, (uint32_t)addr, (uint32_t)len, 0, 0, 0);
+}
+```
+
+
+
+### 4.2、Receiving Packets: Network Server
+
+在 network server input environment中，我们需要使用新的接收系统调用来接收数据包，并使用NSREQ_INPUT IPC消息将它们传递到 core network server environment。这些IPC输入消息应该有一个带有union Nsipc的页面，该页面的struct jif_pkt pkt字段由从网络接收到的包填充。
+
+
+
+**Exercise 12.** Implement `net/input.c`.
+
+
+
+#### input.c
+
+```C
+void
+sleep(int msec)
+{
+       unsigned now = sys_time_msec();
+       unsigned end = now + msec;
+
+       if ((int)now < 0 && (int)now > -MAXERROR)
+               panic("sys_time_msec: %e", (int)now);
+
+       while (sys_time_msec() < end)
+               sys_yield();
+}
+
+void
+input(envid_t ns_envid)
+{
+	binaryname = "ns_input";
+
+	// LAB 6: Your code here:
+	// 	- read a packet from the device driver
+	//	- send it to the network server
+	// Hint: When you IPC a page to the network server, it will be
+	// reading from it for a while, so don't immediately receive
+	// another packet in to the same physical page.
+
+	size_t len;
+	char buf[RX_PKT_SIZE];
+	while (1) {
+		if (sys_pkt_recv(buf, &len) < 0) {
+			continue;
+		}
+
+		memcpy(nsipcbuf.pkt.jp_data, buf, len);
+		nsipcbuf.pkt.jp_len = len;
+		ipc_send(ns_envid, NSREQ_INPUT, &nsipcbuf, PTE_P|PTE_U|PTE_W);
+		sleep(50);
+	}
+}
+```
+
+
+
+### 4.3、The Web Server
+
+最简单的web server发送一个文件的内容到需要的服务器中。在`user/httpd.c`中，我们提供了一个非常简单的web server的骨架代码。骨架代码处理输入链接和解析头部的功能。
+
+
+
+**Exercise 13.** The web server is missing the code that deals with sending the contents of a file back to the client. Finish the web server by implementing `send_file` and `send_data`.
+
+
+
+#### send_data
+
+```C
+static int
+send_data(struct http_request *req, int fd)
+{
+	// LAB 6: Your code here.
+	//panic("send_data not implemented");
+	struct Stat stat;
+	fstat(fd, &stat);
+	void *buf = malloc(stat.st_size);
+	//read from file
+	if (readn(fd, buf, stat.st_size) != stat.st_size) {
+		panic("Failed to read requested file");
+	}
+
+	//write to socket
+  	if (write(req->sock, buf, stat.st_size) != stat.st_size) {
+		panic("Failed to send bytes to client");
+	}
+	free(buf);
+	return 0;
+}
+```
+
+
+
+#### send_file
+
+```C
+// open the requested url for reading
+	// if the file does not exist, send a 404 error using send_error
+	// if the file is a directory, send a 404 error using send_error
+	// set file_size to the size of the file
+
+	// LAB 6: Your code here.
+	//panic("send_file not implemented");
+	if((fd = open(req->url, O_RDONLY)) < 0){
+		send_error(req, 404);
+		goto end;
+	}
+
+	struct Stat stat;
+	fstat(fd, &stat);
+	if (stat.st_isdir) {
+		send_error(req, 404);
+		goto end;
+	}
 ```
 
 
 
 运行`make grade`
 
-```C
-  alloc_block: OK 
-```
-
-
-
-### 2.4、File Operations
-
-在`fs/fs.c`中我们已经提供了各种各样的函数去实现解释和管理文件结构、扫描和管理文件条目以及从根目录遍历文件系统以解析绝对路径名所需的各种基本功能。阅读`fs/fs.c`中的全部代码，保证开始练习之前你已经了解了每个函数都做了什么。
-
-- fs_init：初始化文件系统
-- dir_lookup：在dir中寻找name，找到就将*file指向该name
-- dir_alloc_file：将*file指向dir中的空闲的File structure
-- skip_slash：忽略'/'
-- walk_path：从跟开始计算路径名
-
-
-
-**Exercise 4.** Implement `file_block_walk` and `file_get_block`. `file_block_walk` maps from a block offset within a file to the pointer for that block in the `struct File` or the indirect block, very much like what `pgdir_walk` did for page tables. `file_get_block` goes one step further and maps to the actual disk block, allocating a new one if necessary.
-
-Use make grade to test your code. Your code should pass "file_open", "file_get_block", and "file_flush/file_truncated/file rewrite", and "testfile".
-
-
-
-#### file_block_walk
-
-
-
-file_bolck_walk获取文件F对应的物理块号
-
-```C
-// Find the disk block number slot for the 'filebno'th block in file 'f'.
-// Set '*ppdiskbno' to point to that slot.
-// The slot will be one of the f->f_direct[] entries,
-// or an entry in the indirect block.
-// When 'alloc' is set, this function will allocate an indirect block
-// if necessary.
-//
-// Returns:
-//	0 on success (but note that *ppdiskbno might equal 0).
-//	-E_NOT_FOUND if the function needed to allocate an indirect block, but
-//		alloc was 0.
-//	-E_NO_DISK if there's no space on the disk for an indirect block.
-//	-E_INVAL if filebno is out of range (it's >= NDIRECT + NINDIRECT).
-//
-// Analogy: This is like pgdir_walk for files.
-// Hint: Don't forget to clear any block you allocate.
-```
-
-根据文件f中的fileno 的块号找到硬盘所对应的块号，并用*ppdiskbno指向该块
-
-
-
-前面我们提到过struc File的结构，知道了一个文件有10个direct blocks，如果文件大小超过10个block，则分配indirect block
-
-```C
-static int
-file_block_walk(struct File *f, uint32_t filebno, uint32_t **ppdiskbno, bool alloc)
-{
-    // LAB 5: Your code here.
-    //panic("file_block_walk not implemented");
-	int r;
-	//	-E_INVAL if filebno is out of range (it's >= NDIRECT + NINDIRECT).
-	// inc/fs.h  
-    // #define NDIRECT		10
-    // #define NINDIRECT	(BLKSIZE / 4)
-	if(filebno >= NDIRECT + NINDIRECT)
-		return -E_INVAL;
-	
-	//如果小于10，则直接把f->f_direct的第filebno的地址给他
-	if(filebno < NDIRECT){
-		*ppdiskbno = &f->f_direct[filebno];
-		return 0;
-	}
-
-	//如果大于等于10，则需要找indirect block
-	//注意 File 数据结构中的f_indirect并不是一个指针
-	//而是一个 uint32_t
-	//所以说我们只能有一个indirect block
-	if(f->f_indirect == 0){
-		//	-E_NOT_FOUND if the function needed to allocate an indirect block, but
-		//		alloc was 0.
-		if(alloc == 0)
-			return -E_NOT_FOUND;
-		//	-E_NO_DISK if there's no space on the disk for an indirect block.
-		if((r = alloc_block()) < 0)
-			return -E_NO_DISK;
-		f->f_indirect = r;
-		// When 'alloc' is set, this function will allocate an indirect block
-		// if necessary.
-		memset(diskaddr(r), 0, BLKSIZE);
-		// Hint: Don't forget to clear any block you allocate.
-		flush_block(diskaddr(r));
-	}
-
-	//获得对应的物理块号的地址
-	*ppdiskbno = (uint32_t*)diskaddr(f->f_indirect) + filebno - NDIRECT;
-	return 0;
-}
-```
-
-
-
-#### file_get_block
-
-获取文件F对应的磁盘上的地址
-
-
-
-根据文件的块号获得其在文件系统进程中虚拟地址空间中映射的地址
-
-当文件的块不存在对应的物理块时，还需要为其分配一个物理块
-
-```C
-// Set *blk to the address in memory where the filebno'th
-// block of file 'f' would be mapped.
-//
-// Returns 0 on success, < 0 on error.  Errors are:
-//	-E_NO_DISK if a block needed to be allocated but the disk is full.
-//	-E_INVAL if filebno is out of range.
-//
-// Hint: Use file_block_walk and alloc_block.
-```
-
-
-
-```C
-int
-file_get_block(struct File *f, uint32_t filebno, char **blk)
-{
-    // LAB 5: Your code here.
-    //panic("file_get_block not implemented");
-	int r;
-	uint32_t *ppdiskbno;
-	//先获取文件的物理块号
-	if((r = file_block_walk(f, filebno, &ppdiskbno, 1)) < 0){
-		return r;
-	}
-	//物理块在磁盘上(DISKMAP之上)
-	//如果当前的块号还没有对应的物理块
-	if((*ppdiskbno) == 0){
-		//我们自己给该块分配一个
-		if((r = alloc_block()) < 0)
-			return r;
-		*ppdiskbno = r;
-		//分配好之后应该将分配的物理块中的数据清除
-		//以免读取到其他文件的脏数据
-		memset(diskaddr(r), 0, BLKSIZE);
-		//将文件写入该物理块
-		flush_block(diskaddr(r));
-	}
-	*blk = diskaddr(*ppdiskbno);
-	return 0;
-}
-```
-
-​	
-
-
-
-file_block_walk和file_get_block是文件系统中干重活的人。例如，file_read和file_write只不过是在file_get_block的基础上，在分散的块和顺序缓冲区之间复制字节。
-
-
-
-### 2.5、The file system interface
-
-现在我们已经有了文件系统进程的必要的函数，我们必须要让其他希望使用文件系统的进程可以使用他们。因为其他进程无法直接调用文件系统进程的函数，我们通过a remote produce call 或者叫RPC提供了访问文件系统进程的方式。
-
-```
-      Regular env           FS env
-   +---------------+   +---------------+
-   |      read     |   |   file_read   |
-   |   (lib/fd.c)  |   |   (fs/fs.c)   |
-...|.......|.......|...|.......^.......|...............
-   |       v       |   |       |       | RPC mechanism
-   |  devfile_read |   |  serve_read   |
-   |  (lib/file.c) |   |  (fs/serv.c)  |
-   |       |       |   |       ^       |
-   |       v       |   |       |       |
-   |     fsipc     |   |     serve     |
-   |  (lib/file.c) |   |  (fs/serv.c)  |
-   |       |       |   |       ^       |
-   |       v       |   |       |       |
-   |   ipc_send    |   |   ipc_recv    |
-   |       |       |   |       ^       |
-   +-------|-------+   +-------|-------+
-           |                   |
-           +-------------------+
-```
-
-
-
-虚线以下的内容指示将读请求从常规进程读取到文件系统进程的机制。read(lib/fd.c)可以读取任何的文件描述符，并简单地分配到适当的device read function，在本例中是devfile_read（我们有很多类型的设备，如pipes）。devfile_read实现了专门针对磁盘文件的读取。这个函数和其他dev_file_*函数实现了FS操作的客户端，他们的工作方式大致相同，在request structure(保存在页面fsipcbuf)中绑定参数，调用fsipc发送IPC请求，然后捷豹并返回结果。fsipc函数只处理向服务器发送请求和接收相应的细节。
-
-
-
-文件系统服务器的代码放置在`fs/serv.c`中。它在serve函数中循环，无休止地通过IPC接收请求，将请求分配给相应的处理函数，然后通过IPC将结果返回。在read例子中，serve将请求分配给serve_read，serve_read将处理与读请求相关的IPC细节，比如解包请求结构，最后调用file_read去实际上执行文件读取功能。
-
-
-
-回想JOS的IPC机制允许进程发送一个32bit的字，并且可以选择分享一个页。为了从客户端向服务端发送请求，我们使用32位数据作为请求类型，并在通过IPC共享的页面上的union Fsipc中存储请求的参数。在客户端，我们总是在fsipcbuf共享页面；在服务端，沃恩将传入的请求页面映射到fsreq(0x0ffff000)
-
-
-
-服务器页通过IPC发送请求。我们使用32位数据作为函数的返回代码。对于大多数RPC，这就是他们返回的全部了。FSREQ_READ` and `FSREQ_STAT也返回数据，他们指示将数据写入客户机发送请求的页面。无需再相应IPC中发送此页面，因为客户机与文件系统服务器一开始就共享此页面。同样，`FSREQ_OPEN` shares with the client a new "Fd page"。我们会返回到文件描述符页。
-
-
-
-**Exercise 5.** Implement `serve_read` in `fs/serv.c`.
-
-`serve_read`'s heavy lifting will be done by the already-implemented `file_read` in `fs/fs.c` (which, in turn, is just a bunch of calls to `file_get_block`). `serve_read` just has to provide the RPC interface for file reading. Look at the comments and code in `serve_set_size` to get a general idea of how the server functions should be structured.
-
-Use make grade to test your code. Your code should pass "serve_open/file_stat/file_close" and "file_read" for a score of 70/150.
-
-
-
-#### serve_read
-
-serve_read就是为了读取文件提供给RPC接口，其中繁重的工作已经被file_read实现了，我们只需要参考注释以及serve_set_size中的代码完成该函数即可
-
-首先来看file_read，f表示源，buf表示目的，count表示数量，offset表示起始位置
-
-```C
-// Read count bytes from f into buf, starting from seek position
-// offset.  This meant to mimic the standard pread function.
-// Returns the number of bytes read, < 0 on error.
-ssize_t
-file_read(struct File *f, void *buf, size_t count, off_t offset)
-```
-
-serve_read中要求：
-
-```C
-// Read at most ipc->read.req_n bytes from the current seek position
-// in ipc->read.req_fileid.  Return the bytes read from the file to
-// the caller in ipc->readRet, then update the seek position.  Returns
-// the number of bytes successfully read, or < 0 on error.
-int
-serve_read(envid_t envid, union Fsipc *ipc)
-```
-
-根据要求我们会发现，最后就是要调用file_read，但是目前只知道一个读取数量ipc->read.req_n
-
-
-
-打开Fsret_read(inc/fs.h)，结合注释中Return the bytes read from the file to the caller in ipc->readRet
-
-```C
-struct Fsret_read {
-		char ret_buf[PGSIZE];
-	} readRet;
-```
-
-可以大致猜出ret->ret_buf就是我们要读到的目的地
-
-
-
-打开struct Fsreq_read(inc/fs.h)
-
-```C
-struct Fsreq_read {
-		int req_fileid;
-		size_t req_n;
-	} read;
-```
-
-我们发现ipc->read.req_fileid是一个int类型的参数，说明该参数还不是读取源，所以综上，我们想要调用file_read还需要两个参数
-
-
-
-然后突然想到前面提示我们看serve_set_size寻找思路
-
-```C
-// Set the size of req->req_fileid to req->req_size bytes, truncating
-// or extending the file as necessary.
-int
-serve_set_size(envid_t envid, struct Fsreq_set_size *req)
-{
-	struct OpenFile *o;
-	int r;
-
-	if (debug)
-		cprintf("serve_set_size %08x %08x %08x\n", envid, req->req_fileid, req->req_size);
-
-	// Every file system IPC call has the same general structure.
-	// Here's how it goes.
-
-	// First, use openfile_lookup to find the relevant open file.
-	// On failure, return the error code to the client with ipc_send.
-	if ((r = openfile_lookup(envid, req->req_fileid, &o)) < 0)
-		return r;
-
-	// Second, call the relevant file system function (from fs/fs.c).
-	// On failure, return the error code to the client.
-	return file_set_size(o->o_file, req->req_size);
-}
-```
-
-
-
-该函数中有一个OpenFile(fs/serve.c)
-
-```C
-struct OpenFile {
-	uint32_t o_fileid;	// file id
-	struct File *o_file;	// mapped descriptor for open file
-	int o_mode;		// open mode
-	struct Fd *o_fd;	// Fd page
-};
-```
-
-注释太长，就不粘贴过来了，可以看到，OpenFIle中存在我们需要的源struct File
-
-
-
-且serve_set_size中调用openfile_lookup，可以找到相关的open file，并且发现恰好有我们刚刚不知道怎么用的req->req_fileid，这样我们就找到了file_read中的第一个参数，而最后一个参数也在struct OpenFile中
-
-
-
-说实话，以上这些内容都是我看完网上的实现之后才尝试找到的一些思路，如果自己写的话根本写不出来
-
-
-
-```C
-int
-serve_read(envid_t envid, union Fsipc *ipc)
-{
-	struct Fsreq_read *req = &ipc->read;
-	struct Fsret_read *ret = &ipc->readRet;
-
-	if (debug)
-		cprintf("serve_read %08x %08x %08x\n", envid, req->req_fileid, req->req_n);
-
-	// Lab 5: Your code here:
-	int r;
-	struct OpenFile* o;
-	if((r = openfile_lookup(envid, req->req_fileid, &o)) < 0)
-		return r;
-	struct File* f = o->o_file;
-	// 读取文件，seek position在fd中
-	struct Fd* fd = o->o_fd;
-	if((r = file_read(f, ret->ret_buf, req->req_n, fd->fd_offset)) < 0)
-		return r;
-	fd->fd_offset += r;
-	return r;
-}
-```
-
-
-
-**Exercise 6.** Implement `serve_write` in `fs/serv.c` and `devfile_write` in `lib/file.c`.
-
-Use make grade to test your code. Your code should pass "file_write", "file_read after file_write", "open", and "large file" for a score of 90/150.
-
-
-
-#### serve_write
-
-仿照serve_read完成即可
-
-```C
-// Write req->req_n bytes from req->req_buf to req_fileid, starting at
-// the current seek position, and update the seek position
-// accordingly.  Extend the file if necessary.  Returns the number of
-// bytes written, or < 0 on error.
-int
-serve_write(envid_t envid, struct Fsreq_write *req)
-{
-	if (debug)
-		cprintf("serve_write %08x %08x %08x\n", envid, req->req_fileid, req->req_n);
-
-	// LAB 5: Your code here.
-	//panic("serve_write not implemented");
-	int r;
-	struct OpenFile* o;
-	if((r = openfile_lookup(envid, req->req_fileid, &o)) < 0)
-		return r;
-	int total = 0;
-	while(1){
-		if((r = file_write(o->o_file, req->req_buf, req->req_n, o->o_fd->fd_offset)) < 0)
-			return r;
-		total += r;
-		o->o_fd->fd_offset += r;
-		if(req->req_n <= total)
-			break;
-	}
-	//o->o_fd->fd_offset += r;
-	return total;
-}
-
-```
-
-
-
-#### devfile_write
-
-```C
-// Write at most 'n' bytes from 'buf' to 'fd' at the current seek position.
-//
-// Returns:
-//	 The number of bytes successfully written.
-//	 < 0 on error.
-static ssize_t
-devfile_write(struct Fd *fd, const void *buf, size_t n)
-{
-	// Make an FSREQ_WRITE request to the file system server.  Be
-	// careful: fsipcbuf.write.req_buf is only so large, but
-	// remember that write is always allowed to write *fewer*
-	// bytes than requested.
-	// LAB 5: Your code here
-	//panic("devfile_write not implemented");
-	int r;
-
-	fsipcbuf.write.req_fileid = fd->fd_file.id;
-	// careful: fsipcbuf.write.req_buf is only so large, but
-	// remember that write is always allowed to write *fewer*
-	// bytes than requested.
-	n = n > sizeof(fsipcbuf.write.req_buf) ? sizeof(fsipcbuf.write.req_buf) : n;
-	fsipcbuf.write.req_n = n;
-	memmove(fsipcbuf.write.req_buf, buf, n);
-
-	// Make an FSREQ_WRITE request to the file system server.
-	return fsipc(FSREQ_WRITE, NULL);
-}
-
-```
-
-
-
-## 3、Spawning Processes
-
-此处首先介绍spawn与fork的区别
-
-fork：使用copy-on-write机制，子进程最初只复制mapping page，但是由于大部分数据都是父进程的数据，所以不安全
-
-spawn：从头构建一个子进程，将父进程的数据拷贝到子进程空间中，但是启动较慢（如前面实验提到过的要执行exec等），但是安全
-
-
-
-`lib/spawn.c`中已经为spawn提供了创建新进程的代码，将文件系统的镜像加载进去，然后让子进程运行程序。父进程独立于子进程运行。spawn函数实际上就像UNIX系统中的一个fork，然后在子进程中立即执行exec
-
-
-
-我们实现了spawn而不是一个UNIX类型的exec是因为spawn更容易从用户空间以"exokernel方式"实现，且不需要内核的帮助。
-
-
-
-**Exercise 7.** `spawn` relies on the new syscall `sys_env_set_trapframe` to initialize the state of the newly created environment. Implement `sys_env_set_trapframe` in `kern/syscall.c` (don't forget to dispatch the new system call in `syscall()`).
-
-Test your code by running the `user/spawnhello` program from `kern/init.c`, which will attempt to spawn `/hello` from the file system.
-
-Use make grade to test your code.
-
-
-
-#### sys_env_set_trapframe
-
-首先我们来看spawn中的代码：
-
-```C
-	child_tf.tf_eflags |= FL_IOPL_3;   // devious: see user/faultio.c
-	if ((r = sys_env_set_trapframe(child, &child_tf)) < 0)
-		panic("sys_env_set_trapframe: %e", r);
-```
-
-child是使用exo_fork创建的子进程，但是还未做任何设置，child_tf是准备给child进程的设置，是一个struct Trapframe结构
-
-另一个需要注意的点是spawn中使用了FL_IOPL_3，我们前面提到过**x86处理器使用EFLAGS寄存器中的IOPL位来确定是否允许保护模式代码执行特殊的设备IO指令**，IOPL一共定义了四个
-
-```C
-#define FL_IOPL_MASK	0x00003000	// I/O Privilege Level bitmask
-#define FL_IOPL_0	0x00000000	//   IOPL == 0
-#define FL_IOPL_1	0x00001000	//   IOPL == 1
-#define FL_IOPL_2	0x00002000	//   IOPL == 2
-#define FL_IOPL_3	0x00003000	//   IOPL == 3
-```
-
-此处他们使用的是FL_IOPL_3，在数量层面上与我们前面用的FL_IOPL_MASK相同，但具体的区别暂时还不清楚
-
-下面来看函数实现
-
-```C
-// Set envid's trap frame to 'tf'.
-// tf is modified to make sure that user environments always run at code
-// protection level 3 (CPL 3), interrupts enabled, and IOPL of 0.
-//
-// Returns 0 on success, < 0 on error.  Errors are:
-//	-E_BAD_ENV if environment envid doesn't currently exist,
-//		or the caller doesn't have permission to change envid.
-static int
-sys_env_set_trapframe(envid_t envid, struct Trapframe *tf)
-{
-	// LAB 5: Your code here.
-	// Remember to check whether the user has supplied us with a good
-	// address!
-	struct Env *env;
-	int r;
-	if ((r = envid2env(envid, &env, 1)) < 0) return r;
-	// Set envid's trap frame to 'tf'.
-	env->env_tf = *tf;
-	// interrupts enabled
-    // Lab4中提到过，**扩展中断被%eflags寄存器中的FL_IF位控制**
-	env->env_tf->tf_eflags |= FL_IF;
-	// IOPL of 0
-	env->env_tf->tf_eflags &= ~FL_IOPL_MASK;
-	// tf is modified to make sure that user environments always run at code
-	// protection level 3 (CPL 3)
-	env->env_tf->tf_cs = GD_UT | 3;
-	return 0;
-}
-```
-
-最后，在syscall中添加新的case
-
-```C
-		case SYS_env_set_trapframe:
-			return sys_env_set_trapframe(a1, (struct Trapframe*)a2);
-```
-
-
-
-### 3.1、Sharing library state across fork and spawn
-
-Unix文件描述符是一个通用概念，他还包括pipe、控制台IO等。在JOS中，每个设备都有一个相关的`struct Dev`，该结构中有一个指向函数的指针，这些函数实现了如read/write等功能。`lib/fd.c`实现了类UNIX的文件描述符接口。每个struct Fd表明设备类型，并且大部分`lib/fd.c`中的函数简单地配置了相关的struct Dev的操作
-
-
-
-`lib/fd.c`也在每个应用进程地址空间中保存了文件描述符表区域，起始于`FDTABLE`。这个区域为至多32个文件描述符提供了可以立即打开的一个page大小的区域。任何时候，一个文件描述符页表被映射，当且仅当相关的文件描述符在使用中。每个文件描述符还有一个可选择的“数据页”起始于FILEDATA。
-
-
-
-我们想通过fork和spawn共享文件描述符状态，但是文件描述符状态被保存在用户空间。到目前位置，fork中内存会被标记为copy-on-write，所以文件描述符状态会被复制，而不是共享。（这意味着进程将无法在他们没有打开的文件中进行查找，并且pipe无法跨fork工作）。在spawn中，内存会被留下，而不是复制。也就是说，spawn的进程没有文件描述符
-
-
-
-我们要将fork改为知道哪些区域被“库系统”使用，并将这些区域共享。我们不会硬编码某个区域，而是在页表条目中设置一个otherwise-unused位。
-
-
-
-我们在`inc/lib.h`中定义了一个新的PTE_SHARE。该位是Intel和AMD手册中被标记为"available for software use"的三个PTE位之一。我们要建立一个约定，如果页表条目设置了这个位，PTE应该在fork和spawn中直接从父进程复制到子进程。注意：这将于copy-on-write不同：如第一段所述，我们希望确保共享对页面的更新。（这是页面更新时父子进程同时更新的意思吗？）
-
-
-
-**Exercise 8.** Change `duppage` in `lib/fork.c` to follow the new convention. If the page table entry has the `PTE_SHARE` bit set, just copy the mapping directly. (You should use `PTE_SYSCALL`, not `0xfff`, to mask out the relevant bits from the page table entry. `0xfff` picks up the accessed and dirty bits as well.)
-
-Likewise, implement `copy_shared_pages` in `lib/spawn.c`. It should loop through all page table entries in the current process (just like `fork` did), copying any page mappings that have the `PTE_SHARE` bit set into the child process.
-
-
-
-#### duppage
-
-```C
-static int
-duppage(envid_t envid, unsigned pn)
-{
-	int r;
-	// LAB 4: Your code here.
-	int perm = PTE_U | PTE_P;
-	// 首先判断PTE_SHARE位
-	// 如果有则将所有的page 拷贝过去
-	if ((uvpt[pn] & PTE_SHARE)){
-		sys_page_map(0, (void *) (pn * PGSIZE), envid, (void *) (pn * PGSIZE), PTE_SYSCALL);
-	} else if ((uvpt[pn] & PTE_W) || (uvpt[pn] & PTE_COW)) {
-		perm |= PTE_COW;
-		if ((r = sys_page_map(0, (void *) (pn * PGSIZE), envid, (void *) (pn * PGSIZE), perm)) < 0) {
-			panic("duppage: %e\n", r);
-		}
-
-		if ((r = sys_page_map(0, (void *) (pn * PGSIZE), 0, (void *) (pn * PGSIZE), perm)) < 0) {
-			panic("duppage: %e\n", r);
-		}
-	} else if ((r = sys_page_map(0, (void *) (pn * PGSIZE), envid, (void *) (pn * PGSIZE), perm)) < 0) {
-		panic("duppage: %e\n", r);
-	}
-
-	return 0;
-}
-```
-
-
-
-#### copy_shared_pages
-
-```C
-// Copy the mappings for shared pages into the child address space.
-static int
-copy_shared_pages(envid_t child)
-{
-	// LAB 5: Your code here.
-	uint32_t addr;
-	int r;
-	for(addr = 0; addr < USTACKTOP; addr += PGSIZE){
-		if((uvpd[PDX(addr)] & PTE_P) && (uvpt[PGNUM(addr)] & PTE_P) && (uvpt[PGNUM(addr)] & PTE_U) && (uvpt[PGNUM(addr)] & PTE_SHARE)){
-			if(r = sys_page_map(0, (void*)addr, child, (void*)addr, (uvpt[PGNUM(addr)] & PTE_SYSCALL)) < 0)
-				return r;
-		}
-	}
-	return 0;
-}
-```
-
-
-
-### 3.2、The keyboard interface
-
-为了使shell工作，我么需要一种方法来输入它。QEMU一直在显示我们写入到CGA显示器和串口的输出，但是到目前为止我们只在内核监视器中获取输入。QEMU中，在图形窗口中键入的输入显示为从键盘到JOS的输入，当输入内容输入到控制台时，显示为串口上的字符。
-
-
-
-`kern/console.c`中已经包含了从lab1开始就被使用的键盘和串口驱动，但是现在我们需要把这些附加到系统的其他部分。
-
-
-
-**Exercise 9.** In your `kern/trap.c`, call `kbd_intr` to handle trap `IRQ_OFFSET+IRQ_KBD` and `serial_intr` to handle trap `IRQ_OFFSET+IRQ_SERIAL`.
-
-
-
-`inc/trap.h`中定义，
-
-```C
-#define IRQ_KBD          1
-#define IRQ_SERIAL       4
-```
-
-
-
-#### trap_dispatch
-
-```C
-// Handle keyboard and serial interrupts.
-	// LAB 5: Your code here.
-	if(tf->tf_trapno == IRQ_OFFSET + IRQ_KBD){
-		kbd_intr();
-		return ;
-	}
-
-	if(tf->tf_trapno == IRQ_OFFSET + IRQ_SERIAL){
-		serial_intr();
-		return ;
-	}
-```
-
-
-
-按照其他的trap类型以及提示的函数填写即可，其中：
-
-```C
-void
-kbd_intr(void)
-{
-	cons_intr(kbd_proc_data);
-}
-
-//这个函数就是从接收数据
-/*
- * Get data from the keyboard.  If we finish a character, return it.  Else 0.
- * Return -1 if no data.
- */
-static int
-kbd_proc_data(void); //这个函数有点长，就不放出来了
-
-//这个函数将接受的数据打印出来，所以我们运行的时候控制台我们输入什么接下来就打印什么
-// called by device interrupt routines to feed input characters
-// into the circular console input buffer.
-static void
-cons_intr(int (*proc)(void))
-{
-	int c;
-
-	while ((c = (*proc)()) != -1) {
-		if (c == 0)
-			continue;
-		cons.buf[cons.wpos++] = c;
-		if (cons.wpos == CONSBUFSIZE)
-			cons.wpos = 0;
-	}
-}
-```
-
-串口trap也与之类似
-
-```C
-static int
-serial_proc_data(void)
-{
-	if (!(inb(COM1+COM_LSR) & COM_LSR_DATA))
-		return -1;
-	return inb(COM1+COM_RX);
-}
-
-void
-serial_intr(void)
-{
-	if (serial_exists)
-		cons_intr(serial_proc_data);
-}
-```
-
-
-
-### 3.3、The Shell
-
-运行`make run-icode`或者`make run-icode-nox`。这样会运行我们的内核并且开始`user/icode`。icode执行init，init会设置控制台作为文件描述符0和描述符1（标准输入输出）。icode之后会spawn sh，也就是shell。我们要能够运行以下的命令：
-
-```
-	echo hello world | cat
-	cat lorem |cat
-	cat lorem |num
-	cat lorem |num |num |num |num |num
-	lsfd
-```
-
-注意用户库cprintf直接打印到控制台中，没有使用描述符代码。这种方法对debug很有利但是对piping into other programs不利。为了将输出打印到一个特殊的描述符表中，使用
-
-```C
-fprintf(1, "...", ...)
-```
-
-
-
-**Exercise 10.**
-
-The shell doesn't support I/O redirection. It would be nice to run sh <script instead of having to type in all the commands in the script by hand, as you did above. Add I/O redirection for < to `user/sh.c`.
-
-Test your implementation by typing sh <script into your shell
-
-Run make run-testshell to test your shell. `testshell` simply feeds the above commands (also found in `fs/testshell.sh`) into the shell and then checks that the output matches `fs/testshell.key`.
-
-
-
-#### runcmd
-
-```C
-// Open 't' for reading as file descriptor 0
-			// (which environments use as standard input).
-			// We can't open a file onto a particular descriptor,
-			// so open the file as 'fd',
-			// then check whether 'fd' is 0.
-			// If not, dup 'fd' onto file descriptor 0,
-			// then close the original 'fd'.
-
-			// LAB 5: Your code here.
-			//panic("< redirection not implemented");
-
-			// Open 't' for reading as file descriptor 0
-			int fd = open(t, O_RDONLY);
-			if(fd < 0){
-				cprintf("case <:open err - %e\n", fd);
-				exit();
-			}else if(fd){// then check whether 'fd' is 0.
-			// If not, dup 'fd' onto file descriptor 0,
-			// then close the original 'fd'.
-				dup(fd, 0);
-				close(fd);
-			}
-			break;
-```
-
-
-
-运行结果：
-
-![result](https://github.com/anhongzhan/MIT6.828/blob/lab5/05Lab5/result.PNG)
+![partB](F:\MIT6828\note\06Lab6\partB.PNG)
